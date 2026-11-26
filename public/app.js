@@ -1,7 +1,9 @@
 const content = document.querySelector('#content');
 const state = {
   page: location.hash.slice(1) || 'overview',
-  demo: true,
+  theme: 'light',
+  demo: false,
+  demoAllowed: false,
   emergency: null,
   activity: 'Walking',
   confidence: 0.94,
@@ -17,6 +19,21 @@ const state = {
     { id: 2, name: 'Secondary contact', relationship: 'Friend', phone: '+91 ••••• •• 1357', priority: 2, active: true, primary: false },
   ],
 };
+
+try { if (localStorage.getItem('safeher-theme') === 'dark') state.theme = 'dark'; } catch {}
+document.documentElement.dataset.theme = state.theme;
+
+function setTheme(theme) {
+  state.theme = theme;
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('safeher-theme', theme); } catch {}
+  const button = document.querySelector('#theme-toggle');
+  const next = theme === 'light' ? 'dark' : 'light';
+  button.setAttribute('aria-label', `Switch to ${next} mode`);
+  button.title = `Switch to ${next} mode`;
+  button.textContent = theme === 'light' ? '☾' : '☀';
+  requestAnimationFrame(drawChart);
+}
 
 const pageNames = { overview: 'Overview', live: 'Live Monitoring', location: 'Location Tracking', emergency: 'Emergency Center', activity: 'Activity Detection', contacts: 'Emergency Contacts', history: 'Event History', device: 'Device Management', settings: 'Settings' };
 const sensorDefs = [
@@ -108,7 +125,7 @@ function drawChart() {
   const dpr = window.devicePixelRatio || 1; canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
   const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
   const w = rect.width, h = rect.height, pad = { left: 20, right: 8, top: 7, bottom: 13 };
-  ctx.strokeStyle = '#253043'; ctx.lineWidth = 1; ctx.font = '8px DM Sans'; ctx.fillStyle = '#78849a';
+  ctx.strokeStyle = state.theme === 'light' ? '#d8dfeb' : '#253043'; ctx.lineWidth = 1; ctx.font = '8px DM Sans'; ctx.fillStyle = state.theme === 'light' ? '#68758a' : '#78849a';
   for (let i = 0; i < 4; i++) { const y = pad.top + i * (h - pad.top - pad.bottom) / 3; ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke(); ctx.fillText((1.5 - i).toFixed(1), 0, y + 3); }
   const colors = ['#a18cff', '#ed78b2', '#54cda2'];
   colors.forEach((color, line) => { ctx.beginPath(); state.series.forEach((point, i) => { const value = [point.x, point.y, point.z - .94][line]; const x = pad.left + i * (w - pad.left - pad.right) / (state.series.length - 1); const y = pad.top + (1 - (value + .35) / .7) * (h - pad.top - pad.bottom); if (!i) ctx.moveTo(x,y); else ctx.lineTo(x,y); }); ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.stroke(); });
@@ -136,11 +153,11 @@ function bindPageActions() {
 }
 function action(name, id) {
   if (name === 'sos') {
+    if (!state.demoAllowed || !state.demo) { toast('Demo SOS is unavailable while live mode is selected.', 'error'); return; }
     const dialog = document.querySelector('#confirm-dialog');
     document.querySelector('#dialog-title').textContent = 'Trigger a demo SOS?';
     document.querySelector('#dialog-copy').textContent = 'This creates a local demo event only. No calls or SMS messages will be sent.';
     const confirm = document.querySelector('#dialog-confirm'); confirm.textContent = 'Trigger demo SOS';
-    confirm.classList.remove('button-primary'); confirm.classList.add('button-danger');
     confirm.classList.remove('button-primary'); confirm.classList.add('button-danger');
     confirm.onclick = () => { state.emergency = { type: 'Manual SOS', source: 'Demo touch sensor', time: new Date() }; logEvent('Demo SOS triggered', 'Local preview · no notifications sent', 'alert'); toast('Demo SOS created. No one was contacted.'); setTimeout(render, 0); };
     dialog.showModal(); return;
@@ -153,7 +170,12 @@ function action(name, id) {
     dialog.showModal(); return;
   }
   if (name === 'acknowledge') { logEvent('Demo alert acknowledged', 'Acknowledged in local preview', 'alert'); toast('Demo alert acknowledged.'); render(); return; }
-  if (name === 'toggle-mode') { state.demo = !state.demo; toast(state.demo ? 'Demo mode enabled. Readings are illustrative.' : 'Live mode selected. No device is connected.'); render(); return; }
+  if (name === 'toggle-mode') {
+    if (!state.demoAllowed) { toast('Demo mode is disabled by the server configuration.', 'error'); return; }
+    state.demo = !state.demo;
+    if (!state.demo) { state.events = []; state.contacts = []; state.emergency = null; }
+    toast(state.demo ? 'Demo mode enabled. Readings are illustrative.' : 'Live mode selected. No device is connected.'); render(); return;
+  }
   if (name === 'contact-delete') { state.contacts = state.contacts.filter(c => c.id !== Number(id)); toast('Demo contact removed.'); render(); return; }
   if (name === 'contact-primary') { state.contacts.forEach(c => c.primary = c.id === Number(id)); toast('Primary demo contact updated.'); render(); return; }
   if (name === 'export-csv') { exportCsv(); return; }
@@ -166,7 +188,9 @@ function addContact(event) {
   state.contacts.push(contact); toast('Demo contact added in this page session.'); render();
 }
 function saveSettings(event) {
-  event.preventDefault(); const data = new FormData(event.currentTarget); state.demo = data.get('demo') === 'on'; toast('Dashboard preferences updated for this session.'); render();
+  event.preventDefault(); const data = new FormData(event.currentTarget); state.demo = state.demoAllowed && data.get('demo') === 'on';
+  if (!state.demo) { state.events = []; state.contacts = []; state.emergency = null; }
+  toast('Dashboard preferences updated for this session.'); render();
 }
 function exportCsv() {
   const rows = [['event','detail','category','timestamp'], ...state.events.map(e => [e.type,e.detail,e.category,e.time.toISOString()])];
@@ -185,7 +209,22 @@ window.addEventListener('resize', drawChart);
 document.querySelector('#menu-toggle').addEventListener('click', () => { document.querySelector('#sidebar').classList.add('open'); document.querySelector('#mobile-overlay').classList.add('show'); });
 document.querySelector('#mobile-overlay').addEventListener('click', () => { document.querySelector('#sidebar').classList.remove('open'); document.querySelector('#mobile-overlay').classList.remove('show'); });
 document.querySelector('#notification-button').addEventListener('click', () => toast(state.emergency ? 'There is an active demo SOS event.' : 'No new notifications.'));
-render();
+document.querySelector('#theme-toggle').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
+setTheme(state.theme);
+async function initialize() {
+  try {
+    const response = await fetch('/api/config', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('configuration unavailable');
+    const config = await response.json();
+    state.demoAllowed = config.demo_enabled === true;
+    state.demo = state.demoAllowed;
+    if (!state.demoAllowed) { state.events = []; state.contacts = []; }
+  } catch {
+    state.demoAllowed = false; state.demo = false; state.events = []; state.contacts = [];
+  }
+  render();
+}
+void initialize();
 setInterval(() => {
   if (!state.demo) return;
   const t = Date.now() / 1000;
