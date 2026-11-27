@@ -465,7 +465,9 @@ async function handle(request, response) {
     if (rel.startsWith(`..${sep}`) || rel === '..' || resolve(target) === resolve(root)) return fail(response, 403, 'forbidden_path', 'Asset path is not allowed.');
     try {
       const body = await readFile(target);
-      response.writeHead(200, { 'content-type': mimeTypes[extname(target)] ?? 'application/octet-stream', 'cache-control': extname(target) === '.html' ? 'no-cache' : 'public, max-age=300' });
+      const extension = extname(target);
+      const revalidate = ['.html', '.js', '.css'].includes(extension);
+      response.writeHead(200, { 'content-type': mimeTypes[extension] ?? 'application/octet-stream', 'cache-control': revalidate ? 'no-cache' : 'public, max-age=300' });
       response.end(request.method === 'HEAD' ? undefined : body);
     } catch { fail(response, 404, 'not_found', 'Asset was not found.'); }
   } catch (error) {
