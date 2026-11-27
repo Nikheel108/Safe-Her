@@ -18,6 +18,10 @@
 #define GPS_RX        16
 #define GPS_TX        17
 
+// Set to 1 temporarily to print raw NMEA sentences in Serial Monitor.
+// Set to 0 after GPS diagnostics to keep the dashboard output compact.
+#define GPS_DEBUG_RAW_NMEA 1
+
 #define TOUCH_PIN     32
 #define BUZZER_PIN    25
 #define LED_PIN       18
@@ -44,6 +48,8 @@
 
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(2);
+char gpsNmeaLine[128];
+size_t gpsNmeaLineLength = 0;
 
 // ---------------- SYSTEM VARIABLES -------------------
 
@@ -421,7 +427,22 @@ void readGPS() {
 
   while (gpsSerial.available()) {
 
-    gps.encode(gpsSerial.read());
+    char c = (char)gpsSerial.read();
+    gps.encode(c);
+
+#if GPS_DEBUG_RAW_NMEA
+    if (c == '\n') {
+      gpsNmeaLine[gpsNmeaLineLength] = '\0';
+      if (gpsNmeaLineLength > 0) {
+        Serial.print("GPS NMEA: ");
+        Serial.println(gpsNmeaLine);
+      }
+      gpsNmeaLineLength = 0;
+    }
+    else if (c != '\r' && gpsNmeaLineLength < sizeof(gpsNmeaLine) - 1) {
+      gpsNmeaLine[gpsNmeaLineLength++] = c;
+    }
+#endif
   }
 }
 
@@ -479,6 +500,15 @@ void printSystemStatus() {
   Serial.print("Characters processed: ");
   Serial.println(gps.charsProcessed());
 
+  Serial.print("Valid NMEA sentences: ");
+  Serial.println(gps.passedChecksum());
+
+  Serial.print("Invalid NMEA checksums: ");
+  Serial.println(gps.failedChecksum());
+
+  Serial.print("Sentences with fix: ");
+  Serial.println(gps.sentencesWithFix());
+
   Serial.print("Satellites: ");
 
   if (gps.satellites.isValid()) {
@@ -497,9 +527,14 @@ void printSystemStatus() {
     Serial.println("Not available");
   }
 
+  const bool gpsFixFresh = gps.location.isValid() && gps.location.age() < 10000;
+
+  Serial.print("GPS fix: ");
+  Serial.println(gpsFixFresh ? "YES" : "NO");
+
   Serial.print("Location: ");
 
-  if (gps.location.isValid()) {
+  if (gpsFixFresh) {
 
     Serial.print(gps.location.lat(), 6);
     Serial.print(", ");
@@ -509,19 +544,18 @@ void printSystemStatus() {
     Serial.print(gps.location.age());
     Serial.println(" ms");
 
-    if (gps.location.age() < 10000) {
-
-      Serial.print("Google Maps: https://www.google.com/maps?q=");
-      Serial.print(gps.location.lat(), 6);
-      Serial.print(",");
-      Serial.println(gps.location.lng(), 6);
-    }
-    else {
-      Serial.println("WARNING: GPS fix is stale.");
-    }
+    Serial.print("Google Maps: https://www.google.com/maps?q=");
+    Serial.print(gps.location.lat(), 6);
+    Serial.print(",");
+    Serial.println(gps.location.lng(), 6);
   }
   else {
-    Serial.println("Waiting for GPS fix...");
+    Serial.println("Waiting for fresh GPS fix...");
+    if (gps.location.isValid()) {
+      Serial.print("Last fix age: ");
+      Serial.print(gps.location.age());
+      Serial.println(" ms (stale)");
+    }
   }
 
   Serial.print("Altitude: ");
