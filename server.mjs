@@ -108,7 +108,7 @@ function sameOriginIfProvided(request) {
   if (parsed.host !== host) throw Object.assign(new Error('Cross-origin dashboard requests are not allowed.'), { status: 403, code: 'origin_denied' });
 }
 async function ensureDevice(deviceId, firmwareVersion = null, observedAt = new Date().toISOString()) {
-  const device = { id: deviceId, name: 'Safe Her', last_seen_at: observedAt };
+  const device = { id: deviceId, name: 'Ananya', last_seen_at: observedAt };
   if (firmwareVersion) device.firmware_version = firmwareVersion;
   await store.upsert('devices', device, 'id');
 }
@@ -195,8 +195,8 @@ async function api(request, response, url) {
     const coords=lat===null?'GPS fix unavailable':`${lat.toFixed(6)}, ${lon.toFixed(6)}`;
     const mapsUrl=lat===null?'':`\nMap: https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`;
     const occurredAt=readTimestamp(body.occurred_at,'occurred_at');
-    const smsText=`SAFE HER SOS: Device WSD_001 activated at ${occurredAt}. Location: ${coords}.${lat===null?'':` https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`} Please check on the user.`.slice(0,1500);
-    const payload={event_id:id,device_id:'WSD_001',occurred_at:occurredAt,emails,phones,latitude:lat,longitude:lon,location_text:coords,map_url:lat===null?'':`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`,sensor:body.sensor&&typeof body.sensor==='object'?body.sensor:{},safety:body.safety&&typeof body.safety==='object'?body.safety:{},email_subject:'🚨 SAFE HER SOS ALERT',email_text:`SAFE HER EMERGENCY ALERT\n\nSOS has been activated on device WSD_001.\nTime: ${occurredAt}\nLocation: ${coords}${mapsUrl}\n\nTouch: ${String(payloadSafety(body,'touch'))}\nFall detection: ${String(payloadSafety(body,'fallDetection'))}\nFreefall: ${String(payloadSafety(body,'freeFall'))}\nAcceleration: ${String(payloadSensor(body,'accelMagnitude'))} g\nTemperature: ${String(payloadSensor(body,'temperature'))} °C\n\nPlease contact the user and follow your emergency plan.`};
+    const smsText=`SAFE HER SOS: Ananya's device activated at ${occurredAt}. Location: ${coords}.${lat===null?'':` https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`} Please check on Ananya.`.slice(0,1500);
+    const payload={event_id:id,device_id:'WSD_001',occurred_at:occurredAt,emails,phones,latitude:lat,longitude:lon,location_text:coords,map_url:lat===null?'':`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`,sensor:body.sensor&&typeof body.sensor==='object'?body.sensor:{},safety:body.safety&&typeof body.safety==='object'?body.safety:{},email_subject:'🚨 SAFE HER SOS ALERT',email_text:`SAFE HER EMERGENCY ALERT\n\nSOS has been activated on Ananya's device.\nTime: ${occurredAt}\nLocation: ${coords}${mapsUrl}\n\nTouch: ${String(payloadSafety(body,'touch'))}\nFall detection: ${String(payloadSafety(body,'fallDetection'))}\nFreefall: ${String(payloadSafety(body,'freeFall'))}\nAcceleration: ${String(payloadSensor(body,'accelMagnitude'))} g\nTemperature: ${String(payloadSensor(body,'temperature'))} °C\n\nPlease contact Ananya and follow your emergency plan.`};
     const delivery=Promise.all([sendEmergencyEmail(payload),sendEmergencySms({...payload,smsText})]).then(([email,sms])=>({event_id:id,email,sms}));
     sosNotificationInFlight.set(id,delivery);
     try{const result=await delivery;sosNotificationResults.set(id,result);if(sosNotificationResults.size>500)sosNotificationResults.delete(sosNotificationResults.keys().next().value);sendJson(response,200,result);}finally{sosNotificationInFlight.delete(id);}

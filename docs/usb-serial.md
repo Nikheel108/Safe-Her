@@ -11,6 +11,10 @@ The dashboard reads the ESP32 directly over USB using the browser's Web Serial A
 
 The sketch and dashboard both use **115200 baud**. The dashboard updates after each complete status report printed by the sketch (about every two seconds).
 
+## Manual SOS control
+
+In Emergency Center, connect the ESP32 over USB and use **Activate SOS manually** or **Turn SOS off**. Confirm the action in the prompt. The dashboard sends `S` to activate SOS or `R` to stop it; it updates the displayed state only after the ESP32 reports the new `SOS:` status. Activating SOS runs the sketch's normal alarm and notification flow. Upload the current `firmware/WomenSafetyESP32.ino` sketch to the board before using this control. The existing touch sensor remains available to activate/cancel SOS.
+
 ## Displayed readings
 
 The page shows MPU connection and identity, accelerometer axes and magnitude, gyroscope axes, temperature, GPS satellite count and HDOP, coordinates and location age, altitude, speed, GPS time, touch state, buzzer and LED state, SOS state, fall detection, freefall, and cancel-hold progress.

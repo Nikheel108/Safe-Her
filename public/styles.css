@@ -380,3 +380,8 @@ html.sos-active .app-shell{box-shadow:inset 0 0 0 5px #f0445b, inset 0 0 65px #f
 :root[data-theme="dark"] .emergency-step.warning{background:#2c261a;border-color:#5d4a2d;color:#eac77d}
 @media(max-width:980px){.emergency-center-grid{grid-template-columns:1fr}}
 @media(max-width:760px){.emergency-hero{align-items:flex-start;flex-wrap:wrap;padding:18px}.emergency-hero-icon{width:54px;height:54px;border-radius:15px;font-size:25px}.emergency-hero-copy{flex-basis:calc(100% - 75px)}.emergency-hero-copy h2{font-size:20px}.emergency-hero-actions{justify-content:flex-start;width:100%;margin-top:5px}.emergency-timeline-panel,.emergency-location-panel{padding:16px}.emergency-map-frame{height:235px}.emergency-timeline-item{grid-template-columns:34px minmax(0,1fr) auto;gap:8px;min-height:58px}.emergency-step{width:32px;height:32px}.emergency-timeline-item:not(:last-child):before{left:15px;top:42px}}
+
+.history-page-heading{align-items:flex-end}
+.history-export-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+@media(max-width:760px){.history-page-heading{align-items:flex-start}.history-export-actions{justify-content:flex-start}}
+.local-data-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}

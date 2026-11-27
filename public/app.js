@@ -19,6 +19,9 @@ const state = {
   serialBuffer: '',
   serial: { logs: [], inSystemStatus: false },
   readingHistory: [],
+  indexedDbReady: false,
+  csvRecording: false,
+  csvFileHandle: null,
   lastMapUpdatedAt: 0,
   overviewMapCoords: null,
   overviewLocationMap: null,
@@ -45,15 +48,45 @@ const state = {
   events: [],
   contacts: [],
 };
+const csvReadingFields=['time','updatedAt','mpuConnected','whoAmI','accelX','accelY','accelZ','accelMagnitude','gyroX','gyroY','gyroZ','temperature','gpsCharacters','satellites','hdop','latitude','longitude','locationStatus','locationAge','altitude','speed','gpsDateTime','touch','buzzer','led','sos','fallDetection','freeFall','cancelHold'];
+let csvWriteQueue=Promise.resolve();
+let readingDatabase=null;
+let readingWriteQueue=Promise.resolve();
 
-function restoreLocalState() {
+function openReadingDatabase() {
+  if(readingDatabase)return Promise.resolve(readingDatabase);
+  return new Promise((resolve,reject)=>{
+    const request=indexedDB.open('safeher-local-readings',1);
+    request.onupgradeneeded=()=>{if(!request.result.objectStoreNames.contains('reports'))request.result.createObjectStore('reports',{keyPath:'id'});};
+    request.onsuccess=()=>{readingDatabase=request.result;resolve(readingDatabase);};
+    request.onerror=()=>reject(request.error);
+  });
+}
+function readAllStoredReports(db) {
+  return new Promise((resolve,reject)=>{
+    const request=db.transaction('reports','readonly').objectStore('reports').getAll();
+    request.onsuccess=()=>resolve(request.result.sort((a,b)=>Number(a.time)-Number(b.time)));
+    request.onerror=()=>reject(request.error);
+  });
+}
+function writeStoredReports(db,reports,{clear=false}={}) {
+  return new Promise((resolve,reject)=>{
+    const transaction=db.transaction('reports','readwrite'),store=transaction.objectStore('reports');
+    if(clear)store.clear();else reports.forEach(report=>store.put(report));
+    transaction.oncomplete=()=>resolve();
+    transaction.onerror=()=>reject(transaction.error);
+    transaction.onabort=()=>reject(transaction.error||new Error('Local report storage transaction aborted'));
+  });
+}
+async function restoreLocalState() {
+  let saved=null;
   try {
-    const saved=JSON.parse(localStorage.getItem('safeher-local-device')||'null');
-    if(!saved)return;
+    saved=JSON.parse(localStorage.getItem('safeher-local-device')||'null');
+    saved??={};
     if(saved.serial&&typeof saved.serial==='object')state.serial={...state.serial,...saved.serial};
     if(Array.isArray(saved.series))state.series=saved.series.slice(-600);
     if(!state.series.length&&Array.isArray(saved.readingHistory))state.series=saved.readingHistory.map(r=>({x:Number(r.accelX),y:Number(r.accelY),z:Number(r.accelZ),t:Number(r.time)})).filter(r=>Number.isFinite(r.x)&&Number.isFinite(r.y)&&Number.isFinite(r.z)).slice(-120);
-    if(Array.isArray(saved.readingHistory))state.readingHistory=saved.readingHistory.slice(-2000);
+    if(Array.isArray(saved.readingHistory))state.readingHistory=saved.readingHistory;
     if(Array.isArray(saved.contacts))state.contacts=saved.contacts;
     if(saved.sosDelivery&&typeof saved.sosDelivery==='object')state.sosDelivery=saved.sosDelivery;
     state.events=[];
@@ -61,9 +94,44 @@ function restoreLocalState() {
     if(state.serial.latitude!=null&&state.serial.longitude!=null)state.coords={lat:Number(state.serial.latitude),lon:Number(state.serial.longitude),accuracy:state.serial.hdop==null?null:Number(state.serial.hdop)*5};
     state.emergency=state.serial.sos==='ACTIVE'?{type:'ESP32 SOS',source:'Device safety logic',time:new Date(state.serial.updatedAt||Date.now())}:null;
   } catch { /* Ignore a damaged or unavailable local browser cache. */ }
+  if(!('indexedDB' in window))return;
+  try {
+    const db=await openReadingDatabase();
+    const existing=await readAllStoredReports(db),known=new Set(existing.map(report=>report.id));
+    const legacy=(Array.isArray(saved?.readingHistory)?saved.readingHistory:[]).map((report,index)=>({...report,id:report.id||`legacy-${report.time}-${index}`})).filter(report=>!known.has(report.id));
+    if(legacy.length)await writeStoredReports(db,legacy);
+    state.readingHistory=await readAllStoredReports(db);
+    state.indexedDbReady=true;
+    persistLocalState();
+  } catch { state.indexedDbReady=false; }
+}
+function saveReadingReport(report) {
+  if(!state.indexedDbReady){persistLocalState();return;}
+  readingWriteQueue=readingWriteQueue.then(async()=>{
+    const db=await openReadingDatabase();
+    await writeStoredReports(db,[report]);
+  }).catch(()=>{
+    state.indexedDbReady=false;
+    persistLocalState();
+    toast('Could not save to the browser reading archive. Keep CSV recording on to protect new reports.','error');
+  });
+}
+async function clearLocalReadings() {
+  await readingWriteQueue;
+  state.readingHistory=[];
+  state.series=[];
+  state.serial={logs:[],inSystemStatus:false};
+  try {
+    if('indexedDB' in window)await writeStoredReports(await openReadingDatabase(),[],{clear:true});
+    persistLocalState();
+    toast('Local sensor history cleared.');
+    render();
+  } catch { toast('Could not clear the local reading archive.','error'); }
 }
 function persistLocalState() {
-  try { localStorage.setItem('safeher-local-device',JSON.stringify({serial:state.serial,series:state.series.slice(-600),readingHistory:state.readingHistory.slice(-2000),contacts:state.contacts,events:state.events.slice(-200),sosDelivery:state.sosDelivery})); }
+  const saved={serial:state.serial,series:state.series.slice(-600),contacts:state.contacts,events:state.events.slice(-200),sosDelivery:state.sosDelivery};
+  if(!state.indexedDbReady)saved.readingHistory=state.readingHistory;
+  try { localStorage.setItem('safeher-local-device',JSON.stringify(saved)); }
   catch { toast('Browser storage is full; latest readings may not persist.','error'); }
 }
 
@@ -187,7 +255,7 @@ function historyPage() {
 }
 function devicePage() {
   const online = state.demo || state.online;
-  return `<div class="page-heading"><div><div class="eyebrow">MANAGE / CONNECTED HARDWARE</div><h1>Device Management</h1><p>Hardware capabilities are shown as reported; unsupported telemetry stays unavailable.</p></div><span class="demo-chip"><i></i>${online?'ILLUSTRATIVE DEMO STATUS':'NO DEVICE CONNECTED'}</span></div><div class="wide-grid"><div class="card-stack">${[['ESP32 DevKit','WSD_001',online?'Online':'Offline','Wi-Fi connection',online?'Connected':'Unavailable','Firmware version','Not reported'],['SIM800L GSM','Emergency fallback',online?'Ready (demo)':'Unavailable','Network registration','Not reported','Signal strength','Not reported'],['NEO-6M GPS','Location module',online?'Fix available (demo)':'No fix','Latitude / longitude',online?coordsText():'Unavailable','Satellites','Not reported'],['MPU6050','Motion sensor',online?'Connected (demo)':'Unavailable','Last reading',online?'Illustrative only':'Unavailable','Sample interval','3 seconds (demo)']].map(([name,id,status,l1,v1,l2,v2])=>`<div class="detail-card"><div class="section-header"><h3 style="margin:0">${name}</h3><span class="badge ${online?'success':''}">${status}</span></div><div class="detail-row"><span>Module / ID</span><strong>${id}</strong></div><div class="detail-row"><span>${l1}</span><strong>${v1}</strong></div><div class="detail-row"><span>${l2}</span><strong>${v2}</strong></div></div>`).join('')}</div><div class="card-stack"><div class="detail-card"><h3>Device configuration</h3><div class="form-field"><label for="device-id">Device ID</label><input id="device-id" value="WSD_001" readonly /></div><div class="form-field" style="margin-top:10px"><label for="sensor-interval">Sensor update interval</label><select id="sensor-interval"><option>3 seconds</option><option>5 seconds</option><option>10 seconds</option></select></div><div class="form-field" style="margin-top:10px"><label for="gps-interval">GPS update interval</label><select id="gps-interval"><option>5 seconds</option><option>10 seconds</option><option>30 seconds</option></select></div><p class="field-help">Settings are a UI preview and are not sent to hardware.</p></div><div class="detail-card"><h3>Integration status</h3><div class="empty-state">No ESP32 integration endpoint is configured in this first dashboard phase.</div></div></div></div>`;
+  return `<div class="page-heading"><div><div class="eyebrow">MANAGE / CONNECTED HARDWARE</div><h1>Device Management</h1><p>Hardware capabilities are shown as reported; unsupported telemetry stays unavailable.</p></div><span class="demo-chip"><i></i>${online?'ILLUSTRATIVE DEMO STATUS':'NO DEVICE CONNECTED'}</span></div><div class="wide-grid"><div class="card-stack">${[['ESP32 DevKit','Ananya',online?'Online':'Offline','Wi-Fi connection',online?'Connected':'Unavailable','Firmware version','Not reported'],['SIM800L GSM','Emergency fallback',online?'Ready (demo)':'Unavailable','Network registration','Not reported','Signal strength','Not reported'],['NEO-6M GPS','Location module',online?'Fix available (demo)':'No fix','Latitude / longitude',online?coordsText():'Unavailable','Satellites','Not reported'],['MPU6050','Motion sensor',online?'Connected (demo)':'Unavailable','Last reading',online?'Illustrative only':'Unavailable','Sample interval','3 seconds (demo)']].map(([name,id,status,l1,v1,l2,v2])=>`<div class="detail-card"><div class="section-header"><h3 style="margin:0">${name}</h3><span class="badge ${online?'success':''}">${status}</span></div><div class="detail-row"><span>Module / name</span><strong>${id}</strong></div><div class="detail-row"><span>${l1}</span><strong>${v1}</strong></div><div class="detail-row"><span>${l2}</span><strong>${v2}</strong></div></div>`).join('')}</div><div class="card-stack"><div class="detail-card"><h3>Device configuration</h3><div class="form-field"><label for="device-id">Device name</label><input id="device-id" value="Ananya" readonly /></div><div class="form-field" style="margin-top:10px"><label for="sensor-interval">Sensor update interval</label><select id="sensor-interval"><option>3 seconds</option><option>5 seconds</option><option>10 seconds</option></select></div><div class="form-field" style="margin-top:10px"><label for="gps-interval">GPS update interval</label><select id="gps-interval"><option>5 seconds</option><option>10 seconds</option><option>30 seconds</option></select></div><p class="field-help">Settings are a UI preview and are not sent to hardware.</p></div><div class="detail-card"><h3>Integration status</h3><div class="empty-state">No ESP32 integration endpoint is configured in this first dashboard phase.</div></div></div></div>`;
 }
 function settingsPage() {
   return `<div class="page-heading"><div><div class="eyebrow">MANAGE / PREFERENCES</div><h1>Settings</h1><p>Dashboard preferences and safety workflow configuration.</p></div><span class="demo-chip"><i></i>LOCAL PREVIEW</span></div><div class="wide-grid"><form class="panel" id="settings-form"><div class="section-header"><span class="section-title">SAFETY PREFERENCES</span></div><div class="form-field"><label for="helpline">Emergency helpline number</label><input id="helpline" name="helpline" inputmode="tel" placeholder="Enter a number" /><div class="field-help">This prototype does not place calls or send messages.</div></div><div class="form-field" style="margin-top:12px"><label for="update-interval">Sensor update interval</label><select id="update-interval" name="interval"><option>3 seconds</option><option>5 seconds</option><option>10 seconds</option></select></div><div class="toggle-row"><span><strong>Show demo sensor data</strong><small>Mark the dashboard as illustrative demo mode.</small></span><input class="switch" type="checkbox" name="demo" ${state.demo?'checked':''} /></div><div class="toggle-row"><span><strong>Activity notifications</strong><small>Preference preview only; no messages are sent.</small></span><input class="switch" type="checkbox" name="notifications" checked /></div><button class="button button-primary" type="submit">Save preferences</button></form><div class="card-stack"><div class="detail-card"><h3>Communication preference</h3><div class="detail-row"><span>Wi-Fi</span><strong>Preferred on ESP32</strong></div><div class="detail-row"><span>GSM fallback</span><strong>Handled by device firmware</strong></div><p class="field-help">The dashboard reports communication status from device telemetry. It does not detect GSM availability or perform message fallback.</p></div><div class="detail-card"><h3>Account</h3><div class="detail-row"><span>Profile</span><strong>Ananya Khadakabhavi</strong></div><div class="detail-row"><span>Role</span><strong>Administrator</strong></div><div class="detail-row"><span>Authentication</span><strong>Not connected</strong></div></div></div></div>`;
@@ -354,12 +422,11 @@ function usbContactsPage() {
  return `<div class="page-heading"><div><div class="eyebrow">RESPONSE / TRUSTED PEOPLE</div><h1>Emergency Contacts</h1><p>Contact information is saved in this browser. Email links open your mail app; the dashboard does not send mail.</p></div></div><div class="wide-grid"><div class="panel"><div class="section-title">SAVED CONTACTS (${state.contacts.length})</div>${state.contacts.map(c=>`<div class="detail-card contact-card"><span class="contact-avatar">${esc(c.name.slice(0,2).toUpperCase())}</span><span class="contact-info"><strong>${esc(c.name)} ${c.primary?'<span class="badge success">PRIMARY</span>':''}</strong><small>${esc(c.relationship)} · ${esc(c.phone)} · ${esc(c.email||'Email not added')}</small></span><span class="contact-actions">${c.email?`<a class="button" href="${esc(mailUrl(c.email))}">Email</a>`:''}<button class="button" data-action="contact-primary" data-id="${c.id}" ${c.primary?'disabled':''}>${c.primary?'Primary':'Set primary'}</button><button class="button" data-action="contact-edit" data-id="${c.id}">Edit</button><button class="button" data-action="contact-delete" data-id="${c.id}">Remove</button></span></div>`).join('')||'<div class="empty-state">No contacts saved. Add a trusted contact using the form.</div>'}</div><form class="panel" id="contact-form"><div class="section-header"><span class="section-title">${editing?'EDIT CONTACT':'ADD CONTACT'}</span>${editing?'<button type="button" class="button" data-action="contact-cancel-edit">Cancel edit</button>':''}</div><div class="form-grid"><div class="form-field"><label for="contact-name">Name</label><input id="contact-name" name="name" value="${esc(editing?.name||'')}" required maxlength="60" autocomplete="name"></div><div class="form-field"><label for="contact-phone">Phone</label><input id="contact-phone" name="phone" value="${esc(editing?.phone||'')}" required inputmode="tel" placeholder="+91 98765 43210" autocomplete="tel"></div><div class="form-field"><label for="contact-email">Emergency email</label><input id="contact-email" name="email" value="${esc(editing?.email||'')}" type="email" required maxlength="254" placeholder="name@example.com" autocomplete="email"></div><div class="form-field"><label for="contact-relationship">Relationship</label><input id="contact-relationship" name="relationship" value="${esc(editing?.relationship||'')}" required maxlength="40" placeholder="Family, friend…"></div><div class="form-field"><label for="contact-priority">Priority</label><select id="contact-priority" name="priority">${[1,2,3,4,5].map(n=>`<option value="${n}" ${(editing?.priority||1)===n?'selected':''}>${n}</option>`).join('')}</select></div></div><button class="button button-primary" style="margin-top:13px" type="submit">${editing?'Save contact changes':'Save contact locally'}</button></form></div>`;
 }
 function usbSettingsPage() {
- const size=new Blob([localStorage.getItem('safeher-local-device')||'']).size;
- return `<div class="page-heading"><div><div class="eyebrow">MANAGE / PREFERENCES</div><h1>Settings</h1><p>USB connection, appearance, and local browser storage.</p></div></div><div class="wide-grid"><div class="panel"><div class="section-title">DEVICE CONNECTION</div><div class="detail-row"><span>Connection</span><strong>${state.usbConnected?'USB connected':'Disconnected; showing last saved report'}</strong></div><div class="detail-row"><span>Serial speed</span><strong>115200 baud</strong></div><button class="button button-primary" style="margin-top:12px" data-action="usb-toggle">${state.usbConnected?'Disconnect ESP32':'Connect ESP32 USB'}</button></div><div class="panel"><div class="section-title">LOCAL DATA</div><div class="detail-row"><span>Saved sensor reports</span><strong>${state.readingHistory.length}</strong></div><div class="detail-row"><span>Browser storage used</span><strong>${size} bytes</strong></div><div class="detail-row"><span>Storage location</span><strong>This browser on this computer</strong></div><p class="field-help">Readings stay on this browser and are not uploaded. Clearing browser site data removes them.</p><button class="button button-danger" data-action="clear-local-history">Clear saved readings</button></div><div class="panel"><div class="section-title">APPEARANCE</div><div class="detail-row"><span>Theme</span><strong>${state.theme==='light'?'Light':'Dark'}</strong></div><button class="button" data-action="theme-toggle">Switch to ${state.theme==='light'?'dark':'light'} mode</button></div></div>`;
+ return `<div class="page-heading"><div><div class="eyebrow">MANAGE / PREFERENCES</div><h1>Settings</h1><p>USB connection, appearance, and local browser storage.</p></div></div><div class="wide-grid"><div class="panel"><div class="section-title">DEVICE CONNECTION</div><div class="detail-row"><span>Connection</span><strong>${state.usbConnected?'USB connected':'Disconnected; showing last saved report'}</strong></div><div class="detail-row"><span>Serial speed</span><strong>115200 baud</strong></div><button class="button button-primary" style="margin-top:12px" data-action="usb-toggle">${state.usbConnected?'Disconnect ESP32':'Connect ESP32 USB'}</button></div><div class="panel"><div class="section-title">LOCAL DATA</div><div class="detail-row"><span>Saved sensor reports</span><strong>${state.readingHistory.length}</strong></div><div class="detail-row"><span>Reading archive</span><strong>${state.indexedDbReady?'IndexedDB':'Local browser storage'}</strong></div><div class="detail-row"><span>CSV recording</span><strong>${state.csvRecording?'Recording to selected CSV':'Not recording'}</strong></div><div class="detail-row"><span>Storage location</span><strong>This browser on this computer</strong></div><p class="field-help">There is no 2,000-report app limit. The browser still applies its storage quota. Choose a CSV file to copy saved reports into it and append every new ESP32 report while recording.</p><div class="local-data-actions"><button class="button button-primary" data-action="toggle-csv-recording">${state.csvRecording?'Stop CSV recording':'Start CSV recording'}</button><button class="button" data-action="export-local-backup">Download complete data backup</button><button class="button button-danger" data-action="clear-local-history">Clear saved readings</button></div></div><div class="panel"><div class="section-title">APPEARANCE</div><div class="detail-row"><span>Theme</span><strong>${state.theme==='light'?'Light':'Dark'}</strong></div><button class="button" data-action="theme-toggle">Switch to ${state.theme==='light'?'dark':'light'} mode</button></div></div>`;
 }
 function usbHistoryPage() {
  const filtered=deviceHistoryRows();
- return `<div class="page-heading history-page-heading"><div><div class="eyebrow">SAFE HER / SYSTEM ACTIVITY LOG</div><h1>Event History</h1><p>Search, filter, and inspect actual device and safety reports saved in this browser.</p></div><button class="button export-history-button" data-action="export-csv"><span aria-hidden="true">↓</span> Export CSV</button></div><section class="panel history-browser-panel"><div class="history-filter-bar"><label class="history-search-box"><span aria-hidden="true">⌕</span><input id="history-search" value="${esc(state.historySearch)}" type="search" placeholder="Search reports, readings, or location" aria-label="Search reports, readings, or location"></label><select id="history-filter" class="select-control" aria-label="Filter report category"><option value="all" ${state.historyFilter==='all'?'selected':''}>All categories</option><option value="emergency" ${state.historyFilter==='emergency'?'selected':''}>Emergency</option><option value="fall" ${state.historyFilter==='fall'?'selected':''}>Fall detection</option><option value="gps" ${state.historyFilter==='gps'?'selected':''}>GPS update</option><option value="sensor" ${state.historyFilter==='sensor'?'selected':''}>Sensor report</option></select><select id="history-date-range" class="select-control" aria-label="Filter report date"><option value="7d" ${state.historyDateRange==='7d'?'selected':''}>Last 7 days</option><option value="30d" ${state.historyDateRange==='30d'?'selected':''}>Last 30 days</option><option value="90d" ${state.historyDateRange==='90d'?'selected':''}>Last 90 days</option><option value="all" ${state.historyDateRange==='all'?'selected':''}>All time</option></select><select id="history-sort" class="select-control" aria-label="Sort report history"><option value="newest" ${state.historySort==='newest'?'selected':''}>Latest first</option><option value="oldest" ${state.historySort==='oldest'?'selected':''}>Oldest first</option></select></div><div class="table-wrap history-table-wrap"><table><thead><tr><th>LOCAL REPORT ID</th><th>CATEGORY</th><th>DESCRIPTION</th><th>TIMESTAMP</th><th>SOURCE / LOCATION</th><th>STATUS</th></tr></thead><tbody id="history-table-body">${historyRowsMarkup(filtered.pageRows)}</tbody></table></div><div class="history-table-footer"><span id="history-count">${filtered.start?`Showing ${filtered.start}–${filtered.end} of ${filtered.total} reports`:'No reports match these filters.'} · Local browser archive</span><nav id="history-pagination" class="history-pagination" aria-label="History pages">${historyPaginationMarkup(filtered.pages,state.historyPage)}</nav></div></section>`;
+ return `<div class="page-heading history-page-heading"><div><div class="eyebrow">SAFE HER / SYSTEM ACTIVITY LOG</div><h1>Event History</h1><p>Search, filter, and inspect actual device and safety reports saved in this browser.</p></div><div class="history-export-actions"><button class="button export-history-button" data-action="export-csv"><span aria-hidden="true">↓</span> Export CSV</button><button class="button" data-action="export-local-backup">Download complete data</button></div></div><section class="panel history-browser-panel"><div class="history-filter-bar"><label class="history-search-box"><span aria-hidden="true">⌕</span><input id="history-search" value="${esc(state.historySearch)}" type="search" placeholder="Search reports, readings, or location" aria-label="Search reports, readings, or location"></label><select id="history-filter" class="select-control" aria-label="Filter report category"><option value="all" ${state.historyFilter==='all'?'selected':''}>All categories</option><option value="emergency" ${state.historyFilter==='emergency'?'selected':''}>Emergency</option><option value="fall" ${state.historyFilter==='fall'?'selected':''}>Fall detection</option><option value="gps" ${state.historyFilter==='gps'?'selected':''}>GPS update</option><option value="sensor" ${state.historyFilter==='sensor'?'selected':''}>Sensor report</option></select><select id="history-date-range" class="select-control" aria-label="Filter report date"><option value="7d" ${state.historyDateRange==='7d'?'selected':''}>Last 7 days</option><option value="30d" ${state.historyDateRange==='30d'?'selected':''}>Last 30 days</option><option value="90d" ${state.historyDateRange==='90d'?'selected':''}>Last 90 days</option><option value="all" ${state.historyDateRange==='all'?'selected':''}>All time</option></select><select id="history-sort" class="select-control" aria-label="Sort report history"><option value="newest" ${state.historySort==='newest'?'selected':''}>Latest first</option><option value="oldest" ${state.historySort==='oldest'?'selected':''}>Oldest first</option></select></div><div class="table-wrap history-table-wrap"><table><thead><tr><th>LOCAL REPORT ID</th><th>CATEGORY</th><th>DESCRIPTION</th><th>TIMESTAMP</th><th>SOURCE / LOCATION</th><th>STATUS</th></tr></thead><tbody id="history-table-body">${historyRowsMarkup(filtered.pageRows)}</tbody></table></div><div class="history-table-footer"><span id="history-count">${filtered.start?`Showing ${filtered.start}–${filtered.end} of ${filtered.total} reports`:'No reports match these filters.'} · Local browser archive</span><nav id="history-pagination" class="history-pagination" aria-label="History pages">${historyPaginationMarkup(filtered.pages,state.historyPage)}</nav></div></section>`;
 }
 function deviceHistoryEvents() {
  const rows=state.readingHistory.slice().sort((a,b)=>new Date(a.time)-new Date(b.time));
@@ -371,7 +438,7 @@ function deviceHistoryEvents() {
   if(row.sos==='ACTIVE'){category='emergency';description=`SOS active · Freefall ${row.freeFall||'not reported'}`;status='Active in report';}
   else if(row.freeFall==='YES'){category='fall';description=`Freefall detected · Acceleration ${row.accelMagnitude==null?'not reported':`${row.accelMagnitude} g`}`;status='Detected in report';}
   else if(moved){category='gps';description='GPS position reported by the device';status='Fix reported';}
-  const coordinates=hasGps?`${Number(row.latitude).toFixed(6)}, ${Number(row.longitude).toFixed(6)}`:'WSD_001';
+  const coordinates=hasGps?`${Number(row.latitude).toFixed(6)}, ${Number(row.longitude).toFixed(6)}`:'Ananya';
   const timestamp=new Date(row.time).getTime();
   return {id:`RPT-${timestamp}`,category,description,time:timestamp,location:coordinates,status,row};
  });
@@ -402,7 +469,7 @@ function historyPaginationMarkup(pages,current) {
 
 function usbDevicePage() {
  const d=state.serial;
- return `<div class="page-heading"><div><div class="eyebrow">MANAGE / CONNECTED HARDWARE</div><h1>Device Management</h1><p>${state.usbConnected?'ESP32 connected directly by USB.':'Showing last serial readings; USB is disconnected.'}</p></div><button class="button button-primary" data-action="usb-toggle">${state.usbConnected?'Disconnect ESP32':'Connect ESP32 USB'}</button></div><div class="wide-grid"><div class="panel"><div class="section-title">SAFE HER DEVICE</div>${[['Device ID','WSD_001'],['Connection',state.usbConnected?'USB serial':'Disconnected'],['Baud rate','115200'],['MPU sensor',d.mpuConnected?'Connected':d.mpuConnected===false?'Disconnected':'Not reported'],['MPU identity',d.whoAmI],['Latest serial report',d.updatedAt?new Date(d.updatedAt).toLocaleString():'None']].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}<div style="display:flex;gap:8px;margin-top:12px"><a class="button" href="#live" data-navigate="live">Live readings</a><a class="button" href="#settings" data-navigate="settings">Connection settings</a></div></div><div class="panel"><div class="section-title">DEVICE OUTPUTS</div>${[['Touch',d.touch],['Buzzer',d.buzzer],['LED',d.led],['SOS',d.sos],['Fall detection',d.fallDetection],['Freefall',d.freeFall]].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}</div></div>`;
+ return `<div class="page-heading"><div><div class="eyebrow">MANAGE / CONNECTED HARDWARE</div><h1>Device Management</h1><p>${state.usbConnected?'ESP32 connected directly by USB.':'Showing last serial readings; USB is disconnected.'}</p></div><button class="button button-primary" data-action="usb-toggle">${state.usbConnected?'Disconnect ESP32':'Connect ESP32 USB'}</button></div><div class="wide-grid"><div class="panel"><div class="section-title">SAFE HER DEVICE</div>${[['Device name','Ananya'],['Connection',state.usbConnected?'USB serial':'Disconnected'],['Baud rate','115200'],['MPU sensor',d.mpuConnected?'Connected':d.mpuConnected===false?'Disconnected':'Not reported'],['MPU identity',d.whoAmI],['Latest serial report',d.updatedAt?new Date(d.updatedAt).toLocaleString():'None']].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}<div style="display:flex;gap:8px;margin-top:12px"><a class="button" href="#live" data-navigate="live">Live readings</a><a class="button" href="#settings" data-navigate="settings">Connection settings</a></div></div><div class="panel"><div class="section-title">DEVICE OUTPUTS</div>${[['Touch',d.touch],['Buzzer',d.buzzer],['LED',d.led],['SOS',d.sos],['Fall detection',d.fallDetection],['Freefall',d.freeFall]].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}</div></div>`;
 }
 function usbEmergencyPage() {
  const d=state.serial,active=d.sos==='ACTIVE',location=latestKnownEmergencyLocation(),episodes=savedSosEpisodes(),delivery=state.sosDelivery;
@@ -430,10 +497,10 @@ function usbEmergencyPage() {
  const mapBlock=location?'<div id="emergency-osm-map" class="emergency-osm-map" role="application" aria-label="Map showing the latest saved ESP32 emergency location"></div>':'<div class="emergency-map-empty">No GPS position has been saved by the ESP32 yet.</div>';
  const mapLink=location?`<a class="button" target="_blank" rel="noreferrer" href="https://www.openstreetmap.org/?mlat=${encodeURIComponent(location.latitude)}&mlon=${encodeURIComponent(location.longitude)}#map=16/${encodeURIComponent(location.latitude)}/${encodeURIComponent(location.longitude)}">Open full map ↗</a>`:'';
  const currentStatus=active?'SOS ACTIVE':d.updatedAt?'NO ACTIVE SOS':'WAITING FOR DEVICE';
- const statusCopy=active?'The ESP32 reports an active emergency. Use the device touch control to cancel SOS.':d.updatedAt?`No active SOS in the ${state.usbConnected?'current USB report':'last saved device report'}.`:'Connect the ESP32 to monitor its emergency state.';
+ const statusCopy=active?'The ESP32 reports an active emergency. Stop SOS here or use the device touch control.':d.updatedAt?`No active SOS in the ${state.usbConnected?'current USB report':'last saved device report'}.`:'Connect the ESP32 by USB to monitor and manually control SOS.';
  const mapCoordinates=location?`${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`:'No active coordinates';
  const mapFreshness=location?(location.live?'Live GPS fix':'Last saved GPS fix'):'Waiting for device GPS';
- return `<div class="page-heading emergency-page-heading"><div><div class="eyebrow">SAFE HER / RESPONSE COORDINATION</div><h1>Emergency Response Center</h1><p>Device-reported SOS state, GPS location, and provider notification results.</p></div><span class="badge ${active?'danger':d.updatedAt?'success':''}">${currentStatus}</span></div><section class="panel emergency-hero ${active?'emergency-hero-active':''}"><span class="emergency-hero-icon">${active?'!':'✓'}</span><div class="emergency-hero-copy"><small>${active?'EMERGENCY STATUS':'SYSTEM STATUS'}</small><h2>${active?'SOS is active':d.updatedAt?'No active emergency':'Waiting for device'}</h2><p>${esc(statusCopy)}</p></div><div class="emergency-hero-actions"><a class="button ${active?'button-danger':'button-primary'}" href="#location" data-navigate="location">${location?'Open device location':'View location status'}</a><a class="button" href="#contacts" data-navigate="contacts">Emergency contacts</a></div></section><div class="emergency-center-grid"><section class="panel emergency-timeline-panel"><div class="section-header"><div><span class="section-title">EMERGENCY EVENT TIMELINE</span><small class="section-caption">${active?'CURRENT DEVICE SOS':'LIVE DEVICE WORKFLOW'}</small></div><span class="badge ${active?'danger':'success'}">${active?'SOS ACTIVE':'STANDBY'}</span></div><div class="emergency-timeline">${timeline.map(([title,detail,status,tone],index)=>`<div class="emergency-timeline-item"><span class="emergency-step ${tone}">${index+1}</span><span class="emergency-step-copy"><strong>${title}</strong><small>${esc(detail)}</small></span><span class="badge ${tone}">${status}</span></div>`).join('')}</div><div class="emergency-delivery-summary"><div class="section-title">ALERT DELIVERY</div><div class="detail-row"><span>Email</span><strong>${delivery?deliveryLabel(delivery.email?.status):'Waiting for SOS'}</strong></div><div class="detail-row"><span>SMS</span><strong>${delivery?deliveryLabel(delivery.sms?.status):'Waiting for SOS'}</strong></div>${delivery?.email?.detail?`<p class="field-help">Email: ${esc(delivery.email.detail)}</p>`:''}${delivery?.sms?.detail?`<p class="field-help">SMS: ${esc(delivery.sms.detail)}</p>`:''}</div></section><section class="panel emergency-location-panel"><div class="section-header"><div><span class="section-title">EMERGENCY LOCATION</span><small class="section-caption emergency-location-status">${mapFreshness.toUpperCase()}</small></div><a class="icon-button panel-arrow" href="#location" data-navigate="location" aria-label="Open location tracking">↗</a></div><div class="emergency-map-frame">${mapBlock}</div><div class="emergency-location-summary"><div class="detail-row"><span>Coordinates</span><strong>${esc(mapCoordinates)}</strong></div><div class="detail-row"><span>Location status</span><strong>${esc(mapFreshness)}</strong></div>${mapLink}</div></section></div><section class="panel emergency-history-panel"><div class="section-header"><div><span class="section-title">EMERGENCY HISTORY</span><small class="section-caption">SOS EPISODES FROM SAVED ESP32 REPORTS</small></div><a class="footer-link" href="#history" data-navigate="history">View device history →</a></div><div class="table-wrap"><table><thead><tr><th>TIME</th><th>TRIGGER TYPE</th><th>LOCATION</th><th>ALERT STATUS</th><th>RESOLUTION</th></tr></thead><tbody>${episodeRows||'<tr><td colspan="5" class="muted">No SOS activation appears in saved ESP32 reports.</td></tr>'}</tbody></table></div></section>`;
+ return `<div class="page-heading emergency-page-heading"><div><div class="eyebrow">SAFE HER / RESPONSE COORDINATION</div><h1>Emergency Response Center</h1><p>Device-reported SOS state, GPS location, and provider notification results.</p></div><span class="badge ${active?'danger':d.updatedAt?'success':''}">${currentStatus}</span></div><section class="panel emergency-hero ${active?'emergency-hero-active':''}"><span class="emergency-hero-icon">${active?'!':'✓'}</span><div class="emergency-hero-copy"><small>${active?'EMERGENCY STATUS':'SYSTEM STATUS'}</small><h2>${active?'SOS is active':d.updatedAt?'No active emergency':'Waiting for device'}</h2><p>${esc(statusCopy)}</p></div><div class="emergency-hero-actions"><button type="button" class="button ${active?'button-danger':'button-primary'}" data-manual-sos ${state.usbConnected?'':'disabled'}>${active?'Turn SOS off':'Activate SOS manually'}</button><a class="button ${active?'':'button-quiet'}" href="#location" data-navigate="location">${location?'Open device location':'View location status'}</a><a class="button" href="#contacts" data-navigate="contacts">Emergency contacts</a></div></section><div class="emergency-center-grid"><section class="panel emergency-timeline-panel"><div class="section-header"><div><span class="section-title">EMERGENCY EVENT TIMELINE</span><small class="section-caption">${active?'CURRENT DEVICE SOS':'LIVE DEVICE WORKFLOW'}</small></div><span class="badge ${active?'danger':'success'}">${active?'SOS ACTIVE':'STANDBY'}</span></div><div class="emergency-timeline">${timeline.map(([title,detail,status,tone],index)=>`<div class="emergency-timeline-item"><span class="emergency-step ${tone}">${index+1}</span><span class="emergency-step-copy"><strong>${title}</strong><small>${esc(detail)}</small></span><span class="badge ${tone}">${status}</span></div>`).join('')}</div><div class="emergency-delivery-summary"><div class="section-title">ALERT DELIVERY</div><div class="detail-row"><span>Email</span><strong>${delivery?deliveryLabel(delivery.email?.status):'Waiting for SOS'}</strong></div><div class="detail-row"><span>SMS</span><strong>${delivery?deliveryLabel(delivery.sms?.status):'Waiting for SOS'}</strong></div>${delivery?.email?.detail?`<p class="field-help">Email: ${esc(delivery.email.detail)}</p>`:''}${delivery?.sms?.detail?`<p class="field-help">SMS: ${esc(delivery.sms.detail)}</p>`:''}</div></section><section class="panel emergency-location-panel"><div class="section-header"><div><span class="section-title">EMERGENCY LOCATION</span><small class="section-caption emergency-location-status">${mapFreshness.toUpperCase()}</small></div><a class="icon-button panel-arrow" href="#location" data-navigate="location" aria-label="Open location tracking">↗</a></div><div class="emergency-map-frame">${mapBlock}</div><div class="emergency-location-summary"><div class="detail-row"><span>Coordinates</span><strong>${esc(mapCoordinates)}</strong></div><div class="detail-row"><span>Location status</span><strong>${esc(mapFreshness)}</strong></div>${mapLink}</div></section></div><section class="panel emergency-history-panel"><div class="section-header"><div><span class="section-title">EMERGENCY HISTORY</span><small class="section-caption">SOS EPISODES FROM SAVED ESP32 REPORTS</small></div><a class="footer-link" href="#history" data-navigate="history">View device history →</a></div><div class="table-wrap"><table><thead><tr><th>TIME</th><th>TRIGGER TYPE</th><th>LOCATION</th><th>ALERT STATUS</th><th>RESOLUTION</th></tr></thead><tbody>${episodeRows||'<tr><td colspan="5" class="muted">No SOS activation appears in saved ESP32 reports.</td></tr>'}</tbody></table></div></section>`;
 }
 function latestKnownEmergencyLocation() {
  const current=state.serial;
@@ -477,6 +544,31 @@ function refreshEmergencyCenter() {
  if(currentSummary&&nextSummary)currentSummary.innerHTML=nextSummary.innerHTML;
  const status=content.querySelector('.emergency-location-status'),nextStatus=template.content.querySelector('.emergency-location-status');if(status&&nextStatus)status.textContent=nextStatus.textContent;
  initializeEmergencyLocationMap();
+ bindManualSosAction();
+}
+function bindManualSosAction() {
+ if(content.dataset.manualSosBound)return;
+ content.dataset.manualSosBound='true';
+ content.addEventListener('click',event=>{
+  if(event.target.closest('[data-manual-sos]')) requestManualSosToggle();
+ });
+}
+async function writeDeviceCommand(command) {
+ if(!state.usbConnected||!state.serialPort?.writable){toast('Connect the ESP32 by USB before changing its SOS state.','error');return false;}
+ let writer;
+ try {writer=state.serialPort.writable.getWriter();await writer.write(new TextEncoder().encode(command));return true;}
+ catch(error){toast(`Could not send command to ESP32: ${error.message}`,'error');return false;}
+ finally {writer?.releaseLock();}
+}
+function requestManualSosToggle() {
+ if(!state.usbConnected){toast('Connect the ESP32 by USB to control SOS.','error');return;}
+ const active=state.serial.sos==='ACTIVE',dialog=document.querySelector('#confirm-dialog');
+ document.querySelector('#dialog-title').textContent=active?'Turn off SOS on the ESP32?':'Activate SOS on the ESP32?';
+ document.querySelector('#dialog-copy').textContent=active?'This sends the stop command to the connected device and turns off its buzzer and LED.':'This activates the connected device alarm and starts its configured SOS notifications.';
+ const confirm=document.querySelector('#dialog-confirm');confirm.textContent=active?'Turn off SOS':'Activate SOS';
+ confirm.classList.toggle('button-danger',!active);confirm.classList.toggle('button-primary',active);
+ confirm.onclick=async()=>{const sent=await writeDeviceCommand(active?'R':'S');if(sent)toast(`SOS ${active?'stop':'activation'} command sent. Waiting for the ESP32 status report.`);};
+ dialog.showModal();
 }
 function usbActivityPage() {
   const d=state.serial,active=d.freeFall==='YES',has=Boolean(d.updatedAt);
@@ -554,7 +646,7 @@ function parseSerialLine(source) {
   if((m=line.match(/^Freefall detected:\s*(.*)$/i)))d.freeFall=m[1];
   if((m=line.match(/^Cancel hold:\s*(.*)$/i)))d.cancelHold=m[1];
   if(line.includes('[ SYSTEM STATUS ]'))d.inSystemStatus=true;
-  if(d.inSystemStatus&&/^=+/.test(line)){d.inSystemStatus=false;d.updatedAt=Date.now();state.readingHistory.push({...d,time:d.updatedAt,logs:undefined});if(state.readingHistory.length>2000)state.readingHistory.shift();persistLocalState();applySosVisual();if(state.page==='location'&&document.querySelector('#osm-location-map'))updateLocationValues();else if(state.page==='overview'&&content.querySelector('.overview-location .map-preview'))refreshOverviewWithoutReloadingMap();else if(state.page==='emergency'&&content.querySelector('.emergency-location-map'))refreshEmergencyCenter();else render({preserveInputs:true});}
+  if(d.inSystemStatus&&/^=+/.test(line)){d.inSystemStatus=false;d.updatedAt=Date.now();const report={...d,time:d.updatedAt,id:globalThis.crypto?.randomUUID?.()||`${d.updatedAt}-${Math.random().toString(36).slice(2)}`,logs:undefined};state.readingHistory.push(report);appendCsvReading(report);saveReadingReport(report);persistLocalState();applySosVisual();if(state.page==='location'&&document.querySelector('#osm-location-map'))updateLocationValues();else if(state.page==='overview'&&content.querySelector('.overview-location .map-preview'))refreshOverviewWithoutReloadingMap();else if(state.page==='emergency'&&content.querySelector('.emergency-location-map'))refreshEmergencyCenter();else render({preserveInputs:true});}
 }
 async function connectUsb() {
   if(state.usbConnected){await state.serialReader?.cancel();return;}
@@ -570,6 +662,7 @@ async function connectUsb() {
   finally {try{await state.serialPort?.close();}catch{}state.serialPort=null;state.serialReader=null;state.usbConnected=false;document.querySelector('#usb-connect').textContent='Connect ESP32 USB';render();}
 }
 function bindPageActions() {
+  bindManualSosAction();
   document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => action(button.dataset.action, button.dataset.id)));
   document.querySelectorAll('[data-navigate]').forEach(a => a.addEventListener('click', event => { event.preventDefault(); location.hash = a.dataset.navigate; }));
   document.querySelectorAll('[data-range]').forEach(btn => btn.addEventListener('click', () => { document.querySelectorAll('[data-range]').forEach(b => b.classList.toggle('active', b === btn)); state.chartRangeMins=Number(btn.dataset.range);drawChart(); }));
@@ -614,8 +707,10 @@ function action(name, id) {
   if (name === 'theme-toggle') { setTheme(state.theme==='light'?'dark':'light'); render(); return; }
   if (name === 'usb-toggle') { void connectUsb(); return; }
   if (name === 'refresh-map') {if(state.locationMap&&state.serial.latitude!=null){const point=[Number(state.serial.latitude),Number(state.serial.longitude)];state.locationMap.setView(point,16);state.locationMarker?.setLatLng(point).openPopup();state.lastMapUpdatedAt=Date.now();state.lastMapCoords=point;}else toast('The ESP32 has not reported a GPS fix yet.','error');return;}
-  if (name === 'clear-local-history') {if(confirm('Clear saved sensor history and the last device report from this browser?')){state.readingHistory=[];state.series=[];state.serial={logs:[],inSystemStatus:false};persistLocalState();toast('Local sensor history cleared.');render();}return;}
+  if (name === 'clear-local-history') {if(confirm('Clear saved sensor history and the last device report from this browser?')){void clearLocalReadings();}return;}
   if (name === 'export-csv') { exportCsv(); return; }
+  if (name === 'export-local-backup') { exportLocalBackup(); return; }
+  if (name === 'toggle-csv-recording') { void toggleCsvRecording(); return; }
   if (name === 'help') { toast('Support resources will be available when account services are connected.'); return; }
 }
 function addContact(event) {
@@ -642,6 +737,78 @@ function exportCsv() {
   const rows = [['timestamp','mpu_connected','accel_magnitude_g','latitude','longitude','satellites','touch','sos','buzzer','led'], ...state.readingHistory.map(r => [new Date(r.time).toISOString(),r.mpuConnected,r.accelMagnitude,r.latitude,r.longitude,r.satellites,r.touch,r.sos,r.buzzer,r.led])];
   const csv = rows.map(row => row.map(cell => `"${String(cell).replaceAll('"','""')}"`).join(',')).join('\r\n');
   const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([csv], { type:'text/csv;charset=utf-8' })); link.download = 'safeher-device-history.csv'; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0); toast('Saved device history exported as CSV.');
+}
+function exportLocalBackup() {
+  let saved={};
+  try { saved=JSON.parse(localStorage.getItem('safeher-local-device')||'{}'); } catch {}
+  const backup={...saved,readingHistory:state.readingHistory,exportedAt:new Date().toISOString(),format:'Safe Her local browser backup'};
+  const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json;charset=utf-8'});
+  const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`safeher-local-backup-${new Date().toISOString().slice(0,10)}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),0);
+  toast(`Downloaded backup with ${state.readingHistory.length} saved ESP32 reports.`);
+}
+function csvCell(value) {
+  const text=value==null?'':String(value);
+  return `"${text.replaceAll('"','""')}"`;
+}
+function csvLine(report) {
+  return csvReadingFields.map(field=>csvCell(field==='time'?new Date(report.time).toISOString():report[field])).join(',');
+}
+async function toggleCsvRecording() {
+  if(state.csvRecording){
+    await csvWriteQueue;
+    state.csvRecording=false;
+    state.csvFileHandle=null;
+    toast('CSV recording stopped.');
+    render();
+    return;
+  }
+  if(typeof window.showSaveFilePicker!=='function'){
+    toast('CSV recording needs Chrome or Edge on localhost or HTTPS.','error');
+    return;
+  }
+  try {
+    const handle=await window.showSaveFilePicker({suggestedName:'safeher-readings.csv',types:[{description:'CSV file',accept:{'text/csv':['.csv']}}]});
+    const file=await handle.getFile(),existing=await file.text(),header=csvReadingFields.map(csvCell).join(',');
+    if(existing.trim()){
+      const lines=existing.trimEnd().split(/\r?\n/),existingHeader=lines[0];
+      if(existingHeader!==header){
+        if(!window.confirm('This file is not a Safe Her CSV with the current columns. Replace it with your saved readings?'))return;
+        const writable=await handle.createWritable();
+        await writable.write(`${header}\r\n${state.readingHistory.map(csvLine).join('\r\n')}${state.readingHistory.length?'\r\n':''}`);
+        await writable.close();
+      }else{
+        const lastLine=lines.at(-1)||'',lastTimestamp=Date.parse(lastLine.split(',')[0]?.replace(/^"|"$/g,''));
+        const newRows=state.readingHistory.filter(report=>Number.isFinite(lastTimestamp)?Number(report.time)>lastTimestamp:true);
+        if(newRows.length){const writable=await handle.createWritable({keepExistingData:true});await writable.seek(file.size);await writable.write(`${file.size?'\r\n':''}${newRows.map(csvLine).join('\r\n')}\r\n`);await writable.close();}
+      }
+    }else{
+      const writable=await handle.createWritable();
+      await writable.write(`${header}\r\n${state.readingHistory.map(csvLine).join('\r\n')}${state.readingHistory.length?'\r\n':''}`);
+      await writable.close();
+    }
+    state.csvFileHandle=handle;
+    state.csvRecording=true;
+    toast(`CSV recording started with ${state.readingHistory.length} saved reports.`);
+    render();
+  }catch(error){
+    if(error.name!=='AbortError')toast(`Could not start CSV recording: ${error.message}`,'error');
+  }
+}
+function appendCsvReading(report) {
+  if(!state.csvRecording||!state.csvFileHandle)return;
+  const handle=state.csvFileHandle;
+  csvWriteQueue=csvWriteQueue.then(async()=>{
+    if(!state.csvRecording||state.csvFileHandle!==handle)return;
+    const file=await handle.getFile(),writable=await handle.createWritable({keepExistingData:true});
+    await writable.seek(file.size);
+    await writable.write(`${file.size?'\r\n':''}${csvLine(report)}\r\n`);
+    await writable.close();
+  }).catch(error=>{
+    state.csvRecording=false;
+    state.csvFileHandle=null;
+    toast(`CSV recording stopped: ${error.message}`,'error');
+    if(state.page==='settings')render();
+  });
 }
 function updateHistoryRows() {
   const body = document.querySelector('.table-wrap tbody'); if (!body) return;
@@ -682,7 +849,7 @@ document.querySelector('#usb-connect').addEventListener('click', () => void conn
 document.querySelector('#notification-button').addEventListener('click', () => toast(state.emergency ? 'The ESP32 reports an active SOS.' : 'No active SOS reported by the ESP32.'));
 setTheme(state.theme);
 async function initialize() {
-  restoreLocalState(); state.demo=false; state.authenticated=false; state.page=location.hash.slice(1)||'overview';
+  await restoreLocalState(); state.demo=false; state.authenticated=false; state.page=location.hash.slice(1)||'overview';
   render();
 }
 void initialize();
