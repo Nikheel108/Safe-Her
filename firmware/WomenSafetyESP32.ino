@@ -705,12 +705,16 @@ void loop() {
 
     char command = Serial.read();
 
-    if (command == 'R' || command == 'r') {
+    if (command == 'S' || command == 's') {
+
+      activateSOS("DASHBOARD MANUAL");
+
+    }
+    else if (command == 'R' || command == 'r') {
 
       stopSOS();
 
     }
-
     else if (command == 'G' || command == 'g') {
 
       printSystemStatus();
