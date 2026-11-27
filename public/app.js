@@ -863,6 +863,12 @@ function drawFallChart() {
 function safeHerAnswer(question){
   const q=question.toLowerCase().replace(/[^a-z0-9@.+ -]/g,' '),d=state.serial||{};
   if(/\b(hi|hello|hey)\b/.test(q))return {text:'Hello! I can help with Safe Her SOS, device status, fall detection, emergency contacts, and the latest GPS location.'};
+  if(/\b(police|hospital|clinic|pharmacy|ambulance|fire station)\b/.test(q)){
+    const loc=state.live?.latest_location,lat=Number(d.latitude??loc?.latitude),lon=Number(d.longitude??loc?.longitude),hasFix=Number.isFinite(lat)&&Number.isFinite(lon)&&((d.latitude!=null&&d.longitude!=null)||loc);
+    const place=/\b(hospital|clinic|pharmacy|ambulance)\b/.test(q)?'hospital':/\bfire station\b/.test(q)?'fire station':'police station';
+    const query=hasFix?`${place} near ${lat},${lon}`:`${place} near me`;
+    return {text:hasFix?`I can’t verify a station’s phone number in Safe Her, but Google Maps can show nearby ${place}s around the device’s latest GPS fix. Open a result to see its listed phone number and call option.`:`Safe Her has no current GPS fix, so I can’t identify the nearest ${place}. Google Maps can search around your phone’s location; open a result to see its listed number and call option.`,link:`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`,label:`Find nearby ${place}s ↗`};
+  }
   if(/\b(map|where|location|gps|coordinates|address)\b/.test(q)){
     const loc=state.live?.latest_location;
     const lat=Number(d.latitude??loc?.latitude),lon=Number(d.longitude??loc?.longitude);
