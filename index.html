@@ -9,6 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <link rel="stylesheet" href="/public/styles.css" />
   </head>
   <body>
@@ -16,10 +17,10 @@
       <aside class="sidebar" id="sidebar">
         <a class="brand" href="#overview" aria-label="Safe Her overview">
           <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s8-3.6 8-10V5l-8-3-8 3v6c0 6.4 8 10 8 10Z"/><path d="m8.8 12 2.1 2.1 4.5-4.5"/></svg></span>
-          <span class="brand-copy"><strong>SAFENET</strong><small>YOUR SAFETY. ALWAYS CONNECTED.</small></span>
+          <span class="brand-copy"><strong>SAFE HER</strong><small>YOUR SAFETY. ALWAYS CONNECTED.</small></span>
         </a>
         <div class="workspace-label">WORKSPACE <span>⌄</span></div>
-        <div class="device-switch"><span class="device-avatar">SH</span><span><strong>Wearable device</strong><small>WSD_001</small></span><span class="switch-dots">•••</span></div>
+        <div class="device-switch"><span class="device-avatar">SH</span><span><strong>Safe Her</strong><small>WSD_001</small></span><span class="switch-dots">•••</span></div>
         <div class="nav-label">MONITORING</div>
         <nav class="nav-list" aria-label="Main navigation">
           <a class="nav-link active" href="#overview" data-page="overview"><span class="nav-icon">◫</span>Overview</a>
@@ -33,15 +34,16 @@
           <a class="nav-link" href="#device" data-page="device"><span class="nav-icon">▣</span>Device management</a>
           <a class="nav-link" href="#settings" data-page="settings"><span class="nav-icon">⚙</span>Settings</a>
         </nav>
-        <div class="sidebar-bottom"><div class="help-card"><span class="help-icon">✳</span><strong>Need a hand?</strong><p>We're here to help you feel safe.</p><button data-action="help">Contact support <span>↗</span></button></div><div class="profile"><div class="profile-avatar">AK</div><div><strong>Ananya K.</strong><small>Device owner</small></div><button aria-label="Profile menu">•••</button></div></div>
+        <div class="sidebar-bottom"><div class="help-card"><span class="help-icon">USB</span><strong>Direct connection</strong><p>Readings stream from the connected ESP32.</p><button type="button" onclick="document.querySelector('#usb-connect').click()">Connect USB <span>↗</span></button></div><div class="profile"><div class="profile-avatar">SH</div><div><strong>Safe Her</strong><small>ESP32 device</small></div></div></div>
       </aside>
 
       <main class="main-area">
         <header class="topbar">
           <button class="icon-button mobile-menu" id="menu-toggle" aria-label="Open navigation">☰</button>
           <div class="breadcrumbs"><span>Safe Her</span><span>/</span><strong id="breadcrumb-current">Overview</strong></div>
-          <div class="topbar-actions"><div class="connection-pill"><i></i><span>Device online</span></div><button class="icon-button" id="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode">☾</button><button class="icon-button" id="notification-button" aria-label="Notifications">♧<b class="notification-dot"></b></button><span class="topbar-divider"></span><span class="top-date" id="top-date">—</span><div class="top-avatar">AK</div></div>
+          <div class="topbar-actions"><button class="button button-primary" id="usb-connect" type="button">Connect ESP32 USB</button><div class="connection-pill offline"><i></i><span>USB disconnected</span></div><button class="icon-button" id="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode">☾</button><button class="icon-button" id="notification-button" type="button" aria-label="Notifications">♧</button><span class="topbar-divider"></span><span class="top-date" id="top-date">—</span></div>
         </header>
+        <div id="sos-alert-banner" class="sos-alert-banner" role="alert" aria-live="assertive" hidden></div>
         <section class="content" id="content" aria-live="polite"></section>
         <footer class="footer"><span>Safe Her <span class="footer-dot">·</span> Personal safety, thoughtfully connected</span><span>Need help? <a href="#" data-action="help">Contact support ↗</a></span></footer>
       </main>
@@ -49,6 +51,7 @@
     </div>
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
     <dialog class="confirm-dialog" id="confirm-dialog"><form method="dialog"><div class="dialog-mark">!</div><h2 id="dialog-title">Trigger a demo SOS?</h2><p id="dialog-copy">This only creates a local demo event. No real contacts will be notified.</p><div class="dialog-actions"><button class="button button-quiet" value="cancel">Cancel</button><button class="button button-danger" id="dialog-confirm" value="confirm">Trigger demo SOS</button></div></form></dialog>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script type="module" src="/public/app.js"></script>
   </body>
 </html>

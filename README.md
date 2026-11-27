@@ -1,49 +1,39 @@
-# SAFENET — Women Safety IoT Dashboard
+# Safe Her — Women Safety IoT Dashboard
 
-Responsive monitoring dashboard with a Node.js HTTP API, authenticated ESP32 ingestion, and SQLite storage. The visual dashboard follows the supplied Figma Make design.
+Responsive Safe Her dashboard that reads ESP32 sensor output directly from a USB serial connection in the browser. The visual dashboard follows the supplied Figma Make design.
 
 ## Requirements and local setup
 
 - Node.js 24 or newer (uses the built-in `node:sqlite` module).
-- Copy `.env.example` to `.env`, then replace the example secrets with private values.
 - Start the app with `npm run dev` and open [http://localhost:4173](http://localhost:4173).
-- The local SQLite database is created at `data/safe-her.sqlite` by default; set `DATABASE_PATH` to change it.
+- Connect the ESP32 with USB, close Arduino Serial Monitor, then choose **Connect ESP32 USB** in Chrome or Edge.
 
-The development server enables demo mode by default. Set `DEMO_MODE=false` to turn it off. Demo mode is always disabled when `NODE_ENV=production`.
+The dashboard reads the sketch's 115200-baud serial output directly. Real sensor status reports and emergency contacts are saved in this browser's local storage. After USB disconnects, the last saved values remain visible; a new complete report refreshes them. No readings are sent to an API or database. `localhost` is used because browser USB serial access requires a secure browser context.
 
 ## Environment variables
 
 | Variable | Purpose |
 | --- | --- |
-| `ADMIN_PASSWORD` | Password for the dashboard sign-in API. Use a unique, strong secret. |
-| `SESSION_SECRET` | At least 32 random bytes (base64url is convenient) used to sign HttpOnly dashboard sessions. |
-| `DEVICE_API_KEY` | Secret sent by the ESP32 in the `X-Device-Key` header. |
 | `DATABASE_PATH` | Optional SQLite file path. Defaults to `./data/safe-her.sqlite`. |
-| `HOST` | Bind address. Defaults to `0.0.0.0` so a device on the LAN can reach the API. |
+| `HOST` | Bind address. Defaults to `127.0.0.1` for local USB dashboard use. |
 | `PORT` | HTTP port. Defaults to `4173`. |
 | `NODE_ENV` | Set to `production` in production; this disables demo mode and enables secure cookies. |
 | `DEMO_MODE` | Set to `false` to disable the development simulator. Production mode disables it regardless. |
 
-Generate secrets locally; never commit `.env` or put device/admin secrets in browser code. Expose the HTTP service to an ESP32 only on a trusted network behind TLS or a TLS reverse proxy.
+## ESP32 USB setup
 
-## API and ESP32 setup
-
-The device sends sensor, GPS, heartbeat, emergency, and notification-status payloads to authenticated `/api/device/*` endpoints. Dashboard reads and contact management require the session authentication API. See [ESP32 API documentation](docs/esp32-api.md) for payloads, status semantics, and example requests.
-
-The database schema is initialized automatically and includes devices, sensor readings, GPS points, activity predictions, emergency events, contacts, notification delivery logs, device status, system logs, and dashboard sessions. A device key is required to ingest telemetry. Dashboard credentials are required to read precise locations and private contacts.
+The integrated [ESP32 sketch](firmware/WomenSafetyESP32.ino) keeps its sensor, GPS, touch, buzzer, LED, and fall-detection logic and prints readings at 115200 baud. The dashboard parses those serial status blocks and displays MPU axes, magnitude, gyro, temperature, GPS, touch/output state, SOS, and fall-detection state. See [USB serial setup](docs/usb-serial.md).
 
 ## Safety and delivery semantics
 
-- Demo sensor values, coordinates, contacts, and events are development-only and session-local. They are removed from the UI when demo mode is disabled.
+- The dashboard does not generate sensor values or coordinates. Sensor readings and contacts are kept in this browser only; clearing site data removes them. The Location tab shows an interactive OpenStreetMap and sends the current GPS coordinates to that map service to place its marker.
 - The site does not run the ML model. Activity labels/confidence are stored as predictions supplied by the ESP32 or inference service.
 - Emergency alerts begin as `queued`. The backend does not send SMS or make calls. Only a later device/network delivery report can move an alert to `sent`, `delivered`, or `failed`.
 - Wi-Fi/GSM fallback is performed by ESP32 firmware. The web backend records the reported communication method and does not infer GSM availability.
-- Contact APIs and private location/history APIs require a dashboard session. Contact records are never returned by a public endpoint.
+- USB serial is a direct local connection; this mode does not transmit sensor or location readings over Wi-Fi or to Supabase.
 
 ## Checks
 
 Run `npm test` for the API integration checks and `node --check server.mjs && node --check db.mjs && node --check public/app.js` for syntax checks.
 
-## Current implementation boundary
-
-This phase provides the backend API, SQLite persistence, ingestion authentication, and API documentation. The static UI still uses its development demo workflow; connecting its live mode and login screen to the new APIs is the next local implementation phase.
+The firmware's activity classification remains based on its built-in fall-detection logic; it does not run a machine-learning activity classifier.

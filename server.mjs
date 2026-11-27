@@ -3,11 +3,12 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { closeDatabase, db } from './db.mjs';
+import { closeDatabase, store } from './storage.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const mimeTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
 const sessionDuration = 8 * 60 * 60;
+const singleDeviceId = 'WSD_001';
 const loginAttempts = new Map();
 const activityLabels = new Set(['normal', 'walking', 'running', 'sudden_movement', 'potential_fall', 'confirmed_emergency']);
 const deviceStatuses = {
@@ -47,6 +48,7 @@ function readTimestamp(value, field = 'timestamp') {
 function readDeviceId(value) {
   const id = readString(value, 'device_id', { min: 3, max: 64 });
   if (!/^[A-Za-z0-9_-]+$/.test(id)) throw Object.assign(new Error('device_id may contain only letters, numbers, underscores, and hyphens.'), { status: 400, code: 'invalid_device_id' });
+  if (id !== singleDeviceId) throw Object.assign(new Error(`This Safe Her server is configured for device ${singleDeviceId} only.`), { status: 403, code: 'device_not_allowed' });
   return id;
 }
 function secureCompare(left, right) {
@@ -74,39 +76,25 @@ function cookieValue(request, name) {
   return null;
 }
 function sessionToken(sessionId) { return createHmac('sha256', process.env.SESSION_SECRET).update(sessionId).digest('base64url'); }
-function dashboardSession(request) {
+async function dashboardSession(request) {
   const token = cookieValue(request, 'safeher_session');
   if (!token) return false;
   const [id, signature, extra] = token.split('.');
   if (!id || !signature || extra) return false;
   if (!secureCompare(signature, sessionToken(id))) return false;
-  const session = db.prepare('SELECT expires_at FROM dashboard_sessions WHERE id = ?').get(id);
+  const session = await store.one('dashboard_sessions', { filters: { id } });
   if (!session || session.expires_at <= Math.floor(Date.now() / 1000)) {
-    if (session) db.prepare('DELETE FROM dashboard_sessions WHERE id = ?').run(id);
+    if (session) await store.remove('dashboard_sessions', { id });
     return false;
   }
   return id;
 }
-function requireDashboardSession(request, response) {
-  if (!process.env.ADMIN_PASSWORD || !process.env.SESSION_SECRET) {
-    fail(response, 503, 'dashboard_auth_not_configured', 'Dashboard access is disabled until ADMIN_PASSWORD and SESSION_SECRET are configured.');
-    return false;
-  }
-  if (!dashboardSession(request)) {
-    fail(response, 401, 'authentication_required', 'Sign in to view dashboard data.');
-    return false;
-  }
+async function requireDashboardSession(request, response) {
+  // Single-device local installation: dashboard routes are intentionally open on the local server.
   return true;
 }
 function requireDeviceKey(request, response) {
-  if (!process.env.DEVICE_API_KEY) {
-    fail(response, 503, 'device_auth_not_configured', 'Device ingestion is disabled until DEVICE_API_KEY is configured.');
-    return false;
-  }
-  if (!secureCompare(request.headers['x-device-key'] ?? '', process.env.DEVICE_API_KEY)) {
-    fail(response, 401, 'invalid_device_key', 'A valid X-Device-Key is required.');
-    return false;
-  }
+  // Ingestion is open on this local server; readDeviceId restricts it to WSD_001.
   return true;
 }
 function sameOriginIfProvided(request) {
@@ -117,13 +105,13 @@ function sameOriginIfProvided(request) {
   try { parsed = new URL(origin); } catch { throw Object.assign(new Error('Invalid Origin header.'), { status: 403, code: 'origin_denied' }); }
   if (parsed.host !== host) throw Object.assign(new Error('Cross-origin dashboard requests are not allowed.'), { status: 403, code: 'origin_denied' });
 }
-function ensureDevice(deviceId, firmwareVersion = null, observedAt = new Date().toISOString()) {
-  db.prepare(`INSERT INTO devices(id, firmware_version, last_seen_at) VALUES(?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET last_seen_at=excluded.last_seen_at, firmware_version=COALESCE(excluded.firmware_version, devices.firmware_version)`)
-    .run(deviceId, firmwareVersion, observedAt);
+async function ensureDevice(deviceId, firmwareVersion = null, observedAt = new Date().toISOString()) {
+  const device = { id: deviceId, name: 'Safe Her', last_seen_at: observedAt };
+  if (firmwareVersion) device.firmware_version = firmwareVersion;
+  await store.upsert('devices', device, 'id');
 }
-function logSystem(deviceId, category, eventType, detail, observedAt) {
-  db.prepare('INSERT INTO system_logs(device_id, category, event_type, detail, observed_at) VALUES(?,?,?,?,?)').run(deviceId, category, eventType, detail ?? '', observedAt ?? new Date().toISOString());
+async function logSystem(deviceId, category, eventType, detail, observedAt) {
+  await store.insert('system_logs', { device_id: deviceId, category, event_type: eventType, detail: detail ?? '', observed_at: observedAt ?? new Date().toISOString() });
 }
 function clampLimit(value, fallback = 100, maximum = 1000) {
   if (value === null || value === '') return fallback;
@@ -157,14 +145,14 @@ async function api(request, response, url) {
   if (method === 'GET' && path === '/api/config') {
     sendJson(response, 200, {
       demo_enabled: process.env.NODE_ENV !== 'production' && process.env.DEMO_MODE !== 'false',
-      dashboard_auth_configured: Boolean(process.env.ADMIN_PASSWORD && process.env.SESSION_SECRET),
-      device_ingestion_configured: Boolean(process.env.DEVICE_API_KEY),
+      dashboard_auth_configured: true,
+      device_ingestion_configured: true,
+      storage: store.mode,
     });
     return;
   }
   if (method === 'GET' && path === '/api/auth/status') {
-    const authenticated = Boolean(process.env.ADMIN_PASSWORD && process.env.SESSION_SECRET && dashboardSession(request));
-    sendJson(response, 200, { authenticated, auth_configured: Boolean(process.env.ADMIN_PASSWORD && process.env.SESSION_SECRET) });
+    sendJson(response, 200, { authenticated: true, auth_configured: true });
     return;
   }
   if (method === 'POST' && path === '/api/auth/login') {
@@ -181,20 +169,20 @@ async function api(request, response, url) {
     }
     loginAttempts.delete(ip);
     const id = randomBytes(24).toString('base64url'); const expiresAt = Math.floor(Date.now() / 1000) + sessionDuration;
-    db.prepare('DELETE FROM dashboard_sessions WHERE expires_at <= ?').run(Math.floor(Date.now() / 1000));
-    db.prepare('INSERT INTO dashboard_sessions(id, expires_at) VALUES(?,?)').run(id, expiresAt);
+    await store.remove('dashboard_sessions', { expires_at: ['lte', Math.floor(Date.now() / 1000)] });
+    await store.insert('dashboard_sessions', { id, expires_at: expiresAt });
     setCookie(response, `${id}.${sessionToken(id)}`, sessionDuration);
     sendJson(response, 200, { authenticated: true, expires_at: new Date(expiresAt * 1000).toISOString() });
     return;
   }
   if (method === 'POST' && path === '/api/auth/logout') {
     sameOriginIfProvided(request);
-    const id = process.env.ADMIN_PASSWORD && process.env.SESSION_SECRET ? dashboardSession(request) : false;
-    if (id) db.prepare('DELETE FROM dashboard_sessions WHERE id = ?').run(id);
+    const id = process.env.ADMIN_PASSWORD && process.env.SESSION_SECRET ? await dashboardSession(request) : false;
+    if (id) await store.remove('dashboard_sessions', { id });
     clearCookie(response); sendJson(response, 200, { authenticated: false }); return;
   }
 
-  if (['/api/device/sensor-data','/api/device/gps','/api/device/emergency','/api/device/heartbeat','/api/device/notification-status'].includes(path)) {
+  if (['/api/device/sensor-data','/api/device/gps','/api/device/emergency','/api/device/emergency/cancel','/api/device/heartbeat','/api/device/notification-status'].includes(path)) {
     if (method !== 'POST') return fail(response, 405, 'method_not_allowed', 'Use POST for device ingestion endpoints.');
     if (!requireDeviceKey(request, response)) return;
     const body = await readJson(request);
@@ -216,12 +204,11 @@ async function api(request, response, url) {
         if (!body.activity || typeof body.activity !== 'object' || !activityLabels.has(body.activity.label)) throw Object.assign(new Error('activity.label must be one of the documented classification labels.'), { status: 400, code: 'invalid_activity' });
         prediction = { label: body.activity.label, confidence: readFinite(body.activity.confidence, 'activity.confidence', { min: 0, max: 1 }) };
       }
-      ensureDevice(deviceId, null, timestamp);
-      const result = db.prepare(`INSERT INTO sensor_readings(device_id, observed_at, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z)
-        VALUES(@device_id,@observed_at,@accel_x,@accel_y,@accel_z,@gyro_x,@gyro_y,@gyro_z)`).run({ device_id: deviceId, observed_at: timestamp, ...sensor });
-      if (prediction) db.prepare('INSERT INTO activity_predictions(device_id, observed_at, label, confidence, source) VALUES(?,?,?,?,?)').run(deviceId, timestamp, prediction.label, prediction.confidence, 'device');
-      logSystem(deviceId, 'sensor', 'sensor_reading_received', 'MPU6050 sample received from device.', timestamp);
-      sendJson(response, 201, { accepted: true, reading_id: Number(result.lastInsertRowid), observed_at: timestamp }); return;
+      await ensureDevice(deviceId, null, timestamp);
+      const result = await store.insert('sensor_readings', { device_id: deviceId, observed_at: timestamp, ...sensor });
+      if (prediction) await store.insert('activity_predictions', { device_id: deviceId, observed_at: timestamp, label: prediction.label, confidence: prediction.confidence, source: 'device' });
+      await logSystem(deviceId, 'sensor', 'sensor_reading_received', 'MPU6050 sample received from device.', timestamp);
+      sendJson(response, 201, { accepted: true, reading_id: result.id, observed_at: timestamp }); return;
     }
 
     if (path === '/api/device/gps') {
@@ -230,10 +217,10 @@ async function api(request, response, url) {
       const longitude = readFinite(body.longitude, 'longitude', { min: -180, max: 180 });
       const accuracy = readFinite(body.accuracy_m, 'accuracy_m', { min: 0, max: 100_000, optional: true });
       const satellites = readInteger(body.satellites, 'satellites', { min: 0, max: 128, optional: true });
-      ensureDevice(deviceId, null, timestamp);
-      const result = db.prepare('INSERT INTO gps_locations(device_id,observed_at,latitude,longitude,accuracy_m,satellites) VALUES(?,?,?,?,?,?)').run(deviceId, timestamp, latitude, longitude, accuracy, satellites);
-      logSystem(deviceId, 'location', 'gps_location_received', 'GPS coordinates received from device.', timestamp);
-      sendJson(response, 201, { accepted: true, location_id: Number(result.lastInsertRowid), observed_at: timestamp }); return;
+      await ensureDevice(deviceId, null, timestamp);
+      const result = await store.insert('gps_locations', { device_id: deviceId, observed_at: timestamp, latitude, longitude, accuracy_m: accuracy, satellites });
+      await logSystem(deviceId, 'location', 'gps_location_received', 'GPS coordinates received from device.', timestamp);
+      sendJson(response, 201, { accepted: true, location_id: result.id, observed_at: timestamp }); return;
     }
 
     if (path === '/api/device/emergency') {
@@ -247,11 +234,19 @@ async function api(request, response, url) {
       const latitude = hasLat ? readFinite(body.latitude, 'latitude', { min: -90, max: 90 }) : null;
       const longitude = hasLon ? readFinite(body.longitude, 'longitude', { min: -180, max: 180 }) : null;
       const label = body.activity_label === undefined ? null : readString(body.activity_label, 'activity_label', { min: 1, max: 32 });
-      const id = eventId(); ensureDevice(deviceId, null, timestamp);
-      db.prepare(`INSERT INTO emergency_events(id,device_id,event_type,trigger_source,observed_at,latitude,longitude,activity_label,alert_status,resolution_status)
-        VALUES(?,?,?,?,?,?,?,?, 'queued','active')`).run(id, deviceId, type, source, timestamp, latitude, longitude, label);
-      logSystem(deviceId, 'emergency', 'emergency_event_received', `${type} event received; notification delivery is unconfirmed.`, timestamp);
+      const id = eventId(); await ensureDevice(deviceId, null, timestamp);
+      await store.insert('emergency_events', { id, device_id: deviceId, event_type: type, trigger_source: source, observed_at: timestamp, latitude, longitude, activity_label: label, alert_status: 'queued', resolution_status: 'active' });
+      await logSystem(deviceId, 'emergency', 'emergency_event_received', `${type} event received; notification delivery is unconfirmed.`, timestamp);
       sendJson(response, 201, { accepted: true, event_id: id, alert_status: 'queued', resolution_status: 'active' }); return;
+    }
+
+    if (path === '/api/device/emergency/cancel') {
+      const timestamp = readTimestamp(body.timestamp);
+      const active = await store.one('emergency_events', { filters: { device_id: deviceId, resolution_status: 'active' }, order: [['observed_at','desc']] });
+      if (!active) { sendJson(response, 200, { accepted: true, resolved: false, reason: 'no_active_event' }); return; }
+      await store.update('emergency_events', { id: active.id, resolution_status: 'active' }, { resolution_status: 'resolved', resolved_at: timestamp });
+      await logSystem(deviceId, 'emergency', 'emergency_cancelled_on_device', 'SOS was cancelled on the device.', timestamp);
+      sendJson(response, 200, { accepted: true, resolved: true, event_id: active.id }); return;
     }
 
     if (path === '/api/device/heartbeat') {
@@ -268,13 +263,11 @@ async function api(request, response, url) {
       fields.battery_voltage = readFinite(body.battery_voltage, 'battery_voltage', { min: 0, max: 30, optional: true });
       for (const field of ['touch_active', 'buzzer_active', 'red_led_active']) {
         if (body[field] !== undefined && typeof body[field] !== 'boolean') throw Object.assign(new Error(`${field} must be a boolean.`), { status: 400, code: 'invalid_device_status' });
-        fields[field] = body[field] === undefined ? null : Number(body[field]);
+        fields[field] = body[field] === undefined ? null : body[field];
       }
-      ensureDevice(deviceId, firmware, timestamp);
-      db.prepare(`INSERT INTO device_status(device_id,heartbeat_at,wifi_status,gsm_status,communication_method,gps_status,mpu6050_status,gsm_signal,battery_percent,battery_voltage,touch_active,buzzer_active,red_led_active)
-        VALUES(@device_id,@heartbeat_at,@wifi_status,@gsm_status,@communication_method,@gps_status,@mpu6050_status,@gsm_signal,@battery_percent,@battery_voltage,@touch_active,@buzzer_active,@red_led_active)
-        ON CONFLICT(device_id) DO UPDATE SET heartbeat_at=excluded.heartbeat_at,wifi_status=excluded.wifi_status,gsm_status=excluded.gsm_status,communication_method=excluded.communication_method,gps_status=excluded.gps_status,mpu6050_status=excluded.mpu6050_status,gsm_signal=excluded.gsm_signal,battery_percent=excluded.battery_percent,battery_voltage=excluded.battery_voltage,touch_active=excluded.touch_active,buzzer_active=excluded.buzzer_active,red_led_active=excluded.red_led_active`).run({ device_id: deviceId, heartbeat_at: timestamp, ...fields });
-      logSystem(deviceId, 'device', 'heartbeat_received', `Heartbeat received via ${fields.communication_method}.`, timestamp);
+      await ensureDevice(deviceId, firmware, timestamp);
+      await store.upsert('device_status', { device_id: deviceId, heartbeat_at: timestamp, ...fields }, 'device_id');
+      await logSystem(deviceId, 'device', 'heartbeat_received', `Heartbeat received via ${fields.communication_method}.`, timestamp);
       sendJson(response, 200, { accepted: true, device_id: deviceId, heartbeat_at: timestamp }); return;
     }
 
@@ -285,65 +278,67 @@ async function api(request, response, url) {
       if (!['wifi','gsm','sms','call','unknown'].includes(channel)) throw Object.assign(new Error('channel is unsupported.'), { status: 400, code: 'invalid_channel' });
       const status = readString(body.status, 'status', { min: 1, max: 16 });
       if (!['queued','sent','delivered','failed','unknown'].includes(status)) throw Object.assign(new Error('status is unsupported.'), { status: 400, code: 'invalid_delivery_status' });
-      const event = db.prepare('SELECT id FROM emergency_events WHERE id=? AND device_id=?').get(emergencyId, deviceId);
+      const event = await store.one('emergency_events', { filters: { id: emergencyId, device_id: deviceId }, select: 'id' });
       if (!event) throw Object.assign(new Error('Emergency event was not found for this device.'), { status: 404, code: 'event_not_found' });
       const recipientRef = readString(body.recipient_ref, 'recipient_ref', { min: 1, max: 80, optional: true });
       const providerRef = readString(body.provider_ref, 'provider_ref', { min: 1, max: 120, optional: true });
-      db.prepare('INSERT INTO notification_logs(event_id,channel,status,recipient_ref,provider_ref,observed_at) VALUES(?,?,?,?,?,?)').run(emergencyId, channel, status, recipientRef, providerRef, timestamp);
-      if (['queued','sent','delivered','failed'].includes(status)) db.prepare('UPDATE emergency_events SET alert_status=? WHERE id=?').run(status, emergencyId);
-      logSystem(deviceId, 'notification', 'notification_status_received', `Device reported ${status} via ${channel}.`, timestamp);
+      await store.insert('notification_logs', { event_id: emergencyId, channel, status, recipient_ref: recipientRef, provider_ref: providerRef, observed_at: timestamp });
+      if (['queued','sent','delivered','failed'].includes(status)) await store.update('emergency_events', { id: emergencyId }, { alert_status: status });
+      await logSystem(deviceId, 'notification', 'notification_status_received', `Device reported ${status} via ${channel}.`, timestamp);
       sendJson(response, 201, { accepted: true, event_id: emergencyId, status, observed_at: timestamp }); return;
     }
     return fail(response, 404, 'device_endpoint_not_found', 'Device endpoint was not found.');
   }
 
   if (path.startsWith('/api/')) {
-    if (!requireDashboardSession(request, response)) return;
+    if (!await requireDashboardSession(request, response)) return;
     if (['POST','PUT','PATCH','DELETE'].includes(method)) sameOriginIfProvided(request);
 
     if (method === 'GET' && path === '/api/dashboard/overview') {
       const deviceId = url.searchParams.get('device_id');
-      const device = deviceId ? db.prepare('SELECT * FROM devices WHERE id=?').get(readDeviceId(deviceId)) : db.prepare('SELECT * FROM devices ORDER BY last_seen_at DESC LIMIT 1').get();
+      const device = await store.one('devices', { filters: { id: deviceId ? readDeviceId(deviceId) : singleDeviceId } });
       if (!device) { sendJson(response, 200, { device: null, status: null, latest_sensor: null, latest_location: null, latest_activity: null, active_emergency: null }); return; }
       const id = device.id;
       sendJson(response, 200, {
         device,
-        status: db.prepare('SELECT * FROM device_status WHERE device_id=?').get(id) ?? null,
-        latest_sensor: db.prepare('SELECT * FROM sensor_readings WHERE device_id=? ORDER BY observed_at DESC,id DESC LIMIT 1').get(id) ?? null,
-        latest_location: db.prepare('SELECT * FROM gps_locations WHERE device_id=? ORDER BY observed_at DESC,id DESC LIMIT 1').get(id) ?? null,
-        latest_activity: db.prepare('SELECT * FROM activity_predictions WHERE device_id=? ORDER BY observed_at DESC,id DESC LIMIT 1').get(id) ?? null,
-        active_emergency: db.prepare("SELECT * FROM emergency_events WHERE device_id=? AND resolution_status='active' ORDER BY observed_at DESC LIMIT 1").get(id) ?? null,
+        status: await store.one('device_status', { filters: { device_id: id } }),
+        latest_sensor: await store.one('sensor_readings', { filters: { device_id: id }, order: [['observed_at','desc'],['id','desc']] }),
+        latest_location: await store.one('gps_locations', { filters: { device_id: id }, order: [['observed_at','desc'],['id','desc']] }),
+        latest_activity: await store.one('activity_predictions', { filters: { device_id: id }, order: [['observed_at','desc'],['id','desc']] }),
+        active_emergency: await store.one('emergency_events', { filters: { device_id: id, resolution_status: 'active' }, order: [['observed_at','desc']] }),
       }); return;
     }
     if (method === 'GET' && path === '/api/device/status') {
       const deviceId = url.searchParams.get('device_id');
-      const status = deviceId ? db.prepare('SELECT d.id,d.name,d.last_seen_at,d.firmware_version,s.* FROM devices d LEFT JOIN device_status s ON s.device_id=d.id WHERE d.id=?').get(readDeviceId(deviceId)) : db.prepare('SELECT d.id,d.name,d.last_seen_at,d.firmware_version,s.* FROM devices d LEFT JOIN device_status s ON s.device_id=d.id ORDER BY d.last_seen_at DESC LIMIT 1').get();
-      sendJson(response, 200, status ?? null); return;
+      const device = await store.one('devices', { filters: { id: deviceId ? readDeviceId(deviceId) : singleDeviceId } });
+      const status = device ? await store.one('device_status', { filters: { device_id: device.id } }) : null;
+      sendJson(response, 200, device ? { ...device, ...status } : null); return;
     }
     if (method === 'GET' && path === '/api/dashboard/sensor-history') {
       const limit = clampLimit(url.searchParams.get('limit'), 100, 1000); const deviceId = url.searchParams.get('device_id');
-      const rows = deviceId ? db.prepare('SELECT * FROM sensor_readings WHERE device_id=? ORDER BY observed_at DESC,id DESC LIMIT ?').all(readDeviceId(deviceId), limit) : db.prepare('SELECT * FROM sensor_readings ORDER BY observed_at DESC,id DESC LIMIT ?').all(limit);
+      const rows = await store.many('sensor_readings', { filters: { device_id: deviceId ? readDeviceId(deviceId) : singleDeviceId }, order: [['observed_at','desc'],['id','desc']], limit });
       sendJson(response, 200, { readings: rows.reverse() }); return;
     }
     if (method === 'GET' && path === '/api/dashboard/location-history') {
       const limit = clampLimit(url.searchParams.get('limit'), 100, 1000); const deviceId = url.searchParams.get('device_id');
-      const rows = deviceId ? db.prepare('SELECT * FROM gps_locations WHERE device_id=? ORDER BY observed_at DESC,id DESC LIMIT ?').all(readDeviceId(deviceId), limit) : db.prepare('SELECT * FROM gps_locations ORDER BY observed_at DESC,id DESC LIMIT ?').all(limit);
+      const rows = await store.many('gps_locations', { filters: { device_id: deviceId ? readDeviceId(deviceId) : singleDeviceId }, order: [['observed_at','desc'],['id','desc']], limit });
       sendJson(response, 200, { locations: rows.reverse() }); return;
     }
     if (method === 'GET' && path === '/api/emergency/events') {
       const limit = clampLimit(url.searchParams.get('limit'), 100, 500); const status = url.searchParams.get('status');
       if (status && !['active','resolved'].includes(status)) throw Object.assign(new Error('status must be active or resolved.'), { status: 400, code: 'invalid_status' });
-      const rows = status ? db.prepare('SELECT * FROM emergency_events WHERE resolution_status=? ORDER BY observed_at DESC LIMIT ?').all(status, limit) : db.prepare('SELECT * FROM emergency_events ORDER BY observed_at DESC LIMIT ?').all(limit);
-      const logQuery = db.prepare('SELECT * FROM notification_logs WHERE event_id=? ORDER BY observed_at');
-      sendJson(response, 200, { events: rows.map(row => ({ ...row, notifications: logQuery.all(row.id) })) }); return;
+      const rows = await store.many('emergency_events', { filters: { device_id: singleDeviceId, ...(status ? { resolution_status: status } : {}) }, order: [['observed_at','desc']], limit });
+      const events = await Promise.all(rows.map(async row => ({ ...row, notifications: await store.many('notification_logs', { filters: { event_id: row.id }, order: [['observed_at','asc']] }) })));
+      sendJson(response, 200, { events }); return;
     }
     if (method === 'GET' && path === '/api/events/history') {
       const limit = clampLimit(url.searchParams.get('limit'), 100, 1000); const category = url.searchParams.get('category'); const q = url.searchParams.get('q')?.slice(0, 100);
-      const rows = db.prepare(`SELECT * FROM system_logs WHERE (? IS NULL OR category=?) AND (? IS NULL OR event_type LIKE '%'||?||'%' OR detail LIKE '%'||?||'%') ORDER BY observed_at DESC LIMIT ?`).all(category, category, q || null, q || null, q || null, limit);
-      sendJson(response, 200, { events: rows }); return;
+      const rows = await store.many('system_logs', { filters: { device_id: singleDeviceId, ...(category ? { category } : {}) }, order: [['observed_at','desc']], limit: q ? 1000 : limit });
+      const events = q ? rows.filter(row => row.event_type.includes(q) || row.detail.includes(q)).slice(0, limit) : rows;
+      sendJson(response, 200, { events }); return;
     }
     if (path === '/api/emergency/contacts' && method === 'GET') {
-      const contacts = db.prepare('SELECT * FROM emergency_contacts ORDER BY priority,id').all().map(mapContact); sendJson(response, 200, { contacts }); return;
+      const contacts = (await store.many('emergency_contacts', { order: [['priority','asc'],['id','asc']] })).map(mapContact); sendJson(response, 200, { contacts }); return;
     }
     if (path === '/api/emergency/contacts' && method === 'POST') {
       const body = await readJson(request, 8 * 1024);
@@ -353,20 +348,15 @@ async function api(request, response, url) {
       const primary = body.primary === undefined ? false : body.primary;
       if (typeof active !== 'boolean' || typeof primary !== 'boolean') throw Object.assign(new Error('active and primary must be booleans.'), { status: 400, code: 'invalid_contact' });
       const id = randomBytes(12).toString('hex');
-      db.exec('BEGIN IMMEDIATE');
-      try {
-        if (primary) db.prepare('UPDATE emergency_contacts SET is_primary=0').run();
-        db.prepare('INSERT INTO emergency_contacts(id,name,phone,relationship,priority,active,is_primary) VALUES(?,?,?,?,?,?,?)').run(id,name,phone,relationship,priority,Number(active),Number(primary));
-        db.exec('COMMIT');
-      } catch (error) { db.exec('ROLLBACK'); throw error; }
-      const contact = mapContact(db.prepare('SELECT * FROM emergency_contacts WHERE id=?').get(id));
+      const saved = await store.rpc('save_emergency_contact', { p_id: id, p_name: name, p_phone: phone, p_relationship: relationship, p_priority: priority, p_active: active, p_primary: primary, p_update: false });
+      const contact = mapContact(saved);
       sendJson(response, 201, { contact }); return;
     }
     const contactMatch = path.match(/^\/api\/emergency\/contacts\/([a-f0-9]{24})$/);
     if (contactMatch && ['PUT','DELETE'].includes(method)) {
-      const id = contactMatch[1]; const existing = db.prepare('SELECT * FROM emergency_contacts WHERE id=?').get(id);
+      const id = contactMatch[1]; const existing = await store.one('emergency_contacts', { filters: { id } });
       if (!existing) return fail(response, 404, 'contact_not_found', 'Contact was not found.');
-      if (method === 'DELETE') { db.prepare('DELETE FROM emergency_contacts WHERE id=?').run(id); sendJson(response, 200, { deleted: true, id }); return; }
+      if (method === 'DELETE') { await store.remove('emergency_contacts', { id }); sendJson(response, 200, { deleted: true, id }); return; }
       const body = await readJson(request, 8 * 1024);
       const name = body.name === undefined ? existing.name : readString(body.name,'name',{min:1,max:80});
       const phone = body.phone === undefined ? existing.phone : normalizeIndianPhone(body.phone);
@@ -375,22 +365,18 @@ async function api(request, response, url) {
       const active = body.active === undefined ? Boolean(existing.active) : body.active;
       const primary = body.primary === undefined ? Boolean(existing.is_primary) : body.primary;
       if (typeof active !== 'boolean' || typeof primary !== 'boolean') throw Object.assign(new Error('active and primary must be booleans.'), { status: 400, code: 'invalid_contact' });
-      db.exec('BEGIN IMMEDIATE');
-      try {
-        if (primary) db.prepare('UPDATE emergency_contacts SET is_primary=0').run();
-        db.prepare("UPDATE emergency_contacts SET name=?,phone=?,relationship=?,priority=?,active=?,is_primary=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").run(name,phone,relationship,priority,Number(active),Number(primary),id);
-        db.exec('COMMIT');
-      } catch (error) { db.exec('ROLLBACK'); throw error; }
-      sendJson(response, 200, { contact: mapContact(db.prepare('SELECT * FROM emergency_contacts WHERE id=?').get(id)) }); return;
+      const saved = await store.rpc('save_emergency_contact', { p_id: id, p_name: name, p_phone: phone, p_relationship: relationship, p_priority: priority, p_active: active, p_primary: primary, p_update: true });
+      sendJson(response, 200, { contact: mapContact(saved) }); return;
     }
     const emergencyAction = path.match(/^\/api\/emergency\/events\/([a-f0-9]{32})\/(acknowledge|resolve)$/);
     if (emergencyAction && method === 'POST') {
       const [, id, action] = emergencyAction; const timestamp = new Date().toISOString();
-      const result = action === 'acknowledge'
-        ? db.prepare('UPDATE emergency_events SET acknowledged_at=COALESCE(acknowledged_at,?) WHERE id=? AND resolution_status=\'active\'').run(timestamp,id)
-        : db.prepare("UPDATE emergency_events SET resolution_status='resolved',resolved_at=? WHERE id=? AND resolution_status='active'").run(timestamp,id);
+      const activeEvent = await store.one('emergency_events', { filters: { id, resolution_status: 'active' } });
+      if (!activeEvent) return fail(response, 404, 'active_event_not_found', 'Active emergency event was not found.');
+      const result = await store.update('emergency_events', { id, resolution_status: 'active' }, action === 'acknowledge' ? { acknowledged_at: activeEvent.acknowledged_at ?? timestamp } : { resolution_status: 'resolved', resolved_at: timestamp });
       if (!result.changes) return fail(response, 404, 'active_event_not_found', 'Active emergency event was not found.');
-      const event = db.prepare('SELECT * FROM emergency_events WHERE id=?').get(id); logSystem(event.device_id,'emergency',action === 'acknowledge' ? 'emergency_acknowledged' : 'emergency_resolved',action === 'acknowledge' ? 'Emergency acknowledged in dashboard.' : 'Emergency resolved in dashboard.',timestamp);
+      const event = await store.one('emergency_events', { filters: { id } });
+      await logSystem(event.device_id,'emergency',action === 'acknowledge' ? 'emergency_acknowledged' : 'emergency_resolved',action === 'acknowledge' ? 'Emergency acknowledged in dashboard.' : 'Emergency resolved in dashboard.',timestamp);
       sendJson(response, 200, { event }); return;
     }
     return fail(response, 404, 'route_not_found', 'API route was not found.');
@@ -400,14 +386,14 @@ async function api(request, response, url) {
 }
 
 async function handle(request, response) {
-  response.setHeader('x-content-type-options', 'nosniff'); response.setHeader('referrer-policy', 'no-referrer');
+  response.setHeader('x-content-type-options', 'nosniff'); response.setHeader('referrer-policy', 'strict-origin-when-cross-origin');
   let url;
   try { url = new URL(request.url, 'http://localhost'); }
   catch { return fail(response, 400, 'invalid_url', 'Request URL is invalid.'); }
   try {
     if (url.pathname.startsWith('/api/')) return await api(request, response, url);
     if (url.pathname === '/health' && request.method === 'GET') {
-      db.prepare('SELECT 1').get(); sendJson(response, 200, { status: 'ok', storage: 'sqlite', mode: process.env.NODE_ENV === 'production' ? 'production' : 'development' }); return;
+      const storage = await store.health(); sendJson(response, 200, { status: 'ok', storage, mode: process.env.NODE_ENV === 'production' ? 'production' : 'development' }); return;
     }
     if (!['GET','HEAD'].includes(request.method ?? 'GET')) return fail(response, 405, 'method_not_allowed', 'Static assets only accept GET or HEAD.');
     let pathname;
@@ -430,8 +416,8 @@ async function handle(request, response) {
 }
 
 const port = Number(process.env.PORT ?? 4173);
-const host = process.env.HOST ?? '0.0.0.0';
+const host = process.env.HOST ?? '127.0.0.1';
 const server = createServer((request,response) => void handle(request,response));
 server.listen(port,host,() => console.log(`Safe Her API listening on http://${host}:${port}`));
-function shutdown() { server.close(() => { closeDatabase(); process.exit(0); }); setTimeout(() => process.exit(1), 5000).unref(); }
+function shutdown() { server.close(async () => { await closeDatabase(); process.exit(0); }); setTimeout(() => process.exit(1), 5000).unref(); }
 process.on('SIGINT',shutdown); process.on('SIGTERM',shutdown);
