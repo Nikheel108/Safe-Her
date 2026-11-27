@@ -49,7 +49,7 @@ const state = {
   contacts: [],
   sharedSosActive: false,
 };
-const csvReadingFields=['time','updatedAt','mpuConnected','whoAmI','accelX','accelY','accelZ','accelMagnitude','gyroX','gyroY','gyroZ','temperature','gpsCharacters','satellites','hdop','latitude','longitude','locationStatus','locationAge','altitude','speed','gpsDateTime','touch','buzzer','led','sos','fallDetection','freeFall','cancelHold'];
+const csvReadingFields=['time','updatedAt','mpuConnected','whoAmI','accelX','accelY','accelZ','accelMagnitude','gyroX','gyroY','gyroZ','temperature','gpsCharacters','satellites','hdop','latitude','longitude','locationStatus','locationAge','altitude','speed','gpsDateTime','touch','buzzer','led','sos','fallDetection','freeFall','fallModelReady','fallProbability','fallPrediction','cancelHold'];
 let csvWriteQueue=Promise.resolve();
 let readingDatabase=null;
 let readingWriteQueue=Promise.resolve();
@@ -665,6 +665,9 @@ function parseSerialLine(source) {
   if((m=line.match(/^SOS:\s*(.*)$/i))){const wasActive=d.sos==='ACTIVE',isActive=m[1].trim().toUpperCase()==='ACTIVE';d.sos=isActive?'ACTIVE':m[1];if(isActive&&!wasActive){state.emergency={type:'ESP32 SOS',source:'Device safety logic',time:new Date()};setSharedSos(true,{announce:true});void sendSosNotifications();}else if(isActive){state.emergency??={type:'ESP32 SOS',source:'Device safety logic',time:new Date(d.updatedAt||Date.now())};}else{state.emergency=null;setSharedSos(false);}}
   if((m=line.match(/^Fall detection:\s*(.*)$/i)))d.fallDetection=m[1];
   if((m=line.match(/^Freefall detected:\s*(.*)$/i)))d.freeFall=m[1];
+  if((m=line.match(/^Fall model:\s*(.*)$/i)))d.fallModelReady=m[1].trim().toUpperCase()==='READY';
+  if((m=line.match(/^Fall probability:\s*([-+\d.]+)/i)))d.fallProbability=Number(m[1]);
+  if((m=line.match(/^Fall prediction:\s*(.*)$/i)))d.fallPrediction=m[1].trim().toUpperCase();
   if((m=line.match(/^Cancel hold:\s*(.*)$/i)))d.cancelHold=m[1];
   if(line.includes('[ SYSTEM STATUS ]'))d.inSystemStatus=true;
   if(d.inSystemStatus&&/^=+/.test(line)){d.inSystemStatus=false;d.updatedAt=Date.now();const report={...d,time:d.updatedAt,id:globalThis.crypto?.randomUUID?.()||`${d.updatedAt}-${Math.random().toString(36).slice(2)}`,logs:undefined};state.readingHistory.push(report);appendCsvReading(report);saveReadingReport(report);persistLocalState();applySosVisual();if(state.page==='location'&&document.querySelector('#osm-location-map'))updateLocationValues();else if(state.page==='overview'&&content.querySelector('.overview-location .map-preview'))refreshOverviewWithoutReloadingMap();else if(state.page==='emergency'&&content.querySelector('.emergency-location-map'))refreshEmergencyCenter();else render({preserveInputs:true});}

@@ -3,6 +3,9 @@
 #include <TinyGPS++.h>
 #include <HardwareSerial.h>
 #include <math.h>
+#include "fall_filter.h"
+#include "fall_features.h"
+#include "fall_model.h"
 
 // WOMEN SAFETY SYSTEM
 // ESP32 DEVKIT V1
@@ -62,7 +65,7 @@ unsigned long mpuPreviousMillis = 0;
 const unsigned long CANCEL_HOLD_TIME = 3000;
 const unsigned long ALARM_INTERVAL = 250;
 const unsigned long PRINT_INTERVAL = 2000;
-const unsigned long MPU_INTERVAL = 20;
+const unsigned long MPU_INTERVAL = 5;
 
 // ---------------- MPU VARIABLES ----------------------
 
@@ -95,6 +98,20 @@ uint8_t mpuIdentity = 0;
 
 bool freeFallDetected = false;
 unsigned long freeFallTime = 0;
+
+ChannelFilter fallAccelFilters[3];
+ChannelFilter fallGyroFilters[3];
+float fallAccelWindow[WIN_N][3];
+float fallGyroWindow[WIN_N][3];
+float fallAccelOrdered[WIN_N][3];
+float fallGyroOrdered[WIN_N][3];
+uint16_t fallWindowCount = 0;
+uint16_t fallSamplesSinceInference = 0;
+uint16_t fallWindowWriteIndex = 0;
+uint8_t fallDecimationPhase = 0;
+bool fallModelReady = false;
+bool fallModelDetected = false;
+float fallProbability = 0.0f;
 
 const float FREEFALL_THRESHOLD = 0.65;
 const float IMPACT_THRESHOLD = 2.5;
@@ -351,38 +368,68 @@ void handleTouchSensor() {
 }
 
 // =====================================================
-// FALL DETECTION
+// MODEL-BASED FALL DETECTION
 // =====================================================
 
-void detectFall() {
+bool runFallModelSample() {
+  const float acc[3] = {accelX, accelY, accelZ};
+  const float gyr[3] = {gyroX, gyroY, gyroZ};
+  float filteredAcc[3], filteredGyr[3];
 
-  if (!mpuConnected || sosActive) return;
-
-  unsigned long now = millis();
-
-  // Detect possible freefall
-  if (accelerationMagnitude < FREEFALL_THRESHOLD) {
-
-    freeFallDetected = true;
-    freeFallTime = now;
+  for (int axis = 0; axis < 3; axis++) {
+    filteredAcc[axis] = filter_step(fallAccelFilters[axis], acc[axis]);
+    filteredGyr[axis] = filter_step(fallGyroFilters[axis], gyr[axis]);
   }
 
-  // Detect impact after freefall
-  if (freeFallDetected) {
+  // The supplied Butterworth filter is designed for 200 Hz. Decimate its
+  // filtered output to the feature extractor's trained 50 Hz sample rate.
+  fallDecimationPhase = (fallDecimationPhase + 1) % 4;
+  if (fallDecimationPhase != 0) return false;
 
-    if (now - freeFallTime <= FALL_DETECTION_WINDOW) {
+  for (int axis = 0; axis < 3; axis++) {
+    fallAccelWindow[fallWindowWriteIndex][axis] = filteredAcc[axis];
+    fallGyroWindow[fallWindowWriteIndex][axis] = filteredGyr[axis];
+  }
+  fallWindowWriteIndex = (fallWindowWriteIndex + 1) % WIN_N;
+  if (fallWindowCount < WIN_N) fallWindowCount++;
+  if (fallWindowCount < WIN_N) return false;
 
-      if (accelerationMagnitude > IMPACT_THRESHOLD) {
+  // Re-evaluate each second with a complete three-second motion window.
+  if (++fallSamplesSinceInference < FS_HZ) return false;
+  fallSamplesSinceInference = 0;
 
-        activateSOS("POSSIBLE FALL / IMPACT");
-
-        freeFallDetected = false;
-      }
+  for (int i = 0; i < WIN_N; i++) {
+    const uint16_t source = (fallWindowWriteIndex + i) % WIN_N;
+    for (int axis = 0; axis < 3; axis++) {
+      fallAccelOrdered[i][axis] = fallAccelWindow[source][axis];
+      fallGyroOrdered[i][axis] = fallGyroWindow[source][axis];
     }
-    else {
+  }
 
-      freeFallDetected = false;
-    }
+  float features[N_FEATURES];
+  compute_fall_features(fallAccelOrdered, fallGyroOrdered, features);
+  fallProbability = fall_model_proba(features);
+  fallModelReady = true;
+  return true;
+}
+
+void detectFall() {
+  if (!mpuConnected) return;
+
+  const unsigned long now = millis();
+  if (accelerationMagnitude < FREEFALL_THRESHOLD) {
+    freeFallDetected = true;
+    freeFallTime = now;
+  } else if (freeFallDetected && now - freeFallTime > FALL_DETECTION_WINDOW) {
+    freeFallDetected = false;
+  }
+
+  const bool previousPrediction = fallModelDetected;
+  if (!runFallModelSample()) return;
+
+  fallModelDetected = fallProbability >= FALL_THRESHOLD;
+  if (fallModelDetected && !previousPrediction && !sosActive) {
+    activateSOS("FALL MODEL");
   }
 }
 
@@ -592,6 +639,15 @@ void printSystemStatus() {
 
   Serial.print("Freefall detected: ");
   Serial.println(freeFallDetected ? "YES" : "NO");
+
+  Serial.print("Fall model: ");
+  Serial.println(fallModelReady ? "READY" : "WARMING UP");
+
+  Serial.print("Fall probability: ");
+  Serial.println(fallProbability, 3);
+
+  Serial.print("Fall prediction: ");
+  Serial.println(fallModelDetected ? "FALL" : "NO FALL");
 
   if (cancelTiming) {
 
