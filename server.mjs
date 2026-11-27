@@ -10,6 +10,8 @@ const mimeTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; char
 const sessionDuration = 8 * 60 * 60;
 const singleDeviceId = 'WSD_001';
 const loginAttempts = new Map();
+const sosNotificationResults = new Map();
+const sosNotificationInFlight = new Map();
 const activityLabels = new Set(['normal', 'walking', 'running', 'sudden_movement', 'potential_fall', 'confirmed_emergency']);
 const deviceStatuses = {
   wifi_status: new Set(['connected', 'disconnected', 'unknown']),
@@ -137,10 +139,69 @@ function clearCookie(response) {
   response.setHeader('set-cookie', `safeher_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
 }
 function eventId() { return randomBytes(16).toString('hex'); }
+function validateAlertRecipients(value, field, pattern) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.slice(0, 10).filter(item => typeof item === 'string' && item.length <= 254 && pattern.test(item)).map(item => item.trim()))];
+}
+async function sendEmergencyEmail(payload) {
+  const recipients=payload.emails;
+  if(!recipients.length)return {status:'no_recipients',detail:'No emergency email addresses are saved.'};
+  if(!process.env.EMERGENCY_WEBHOOK_URL||!process.env.EMERGENCY_WEBHOOK_SECRET)return {status:'not_configured',detail:'Configure the Google Apps Script webhook in the server .env.'};
+  let webhook;
+  try{webhook=new URL(process.env.EMERGENCY_WEBHOOK_URL);}catch{return {status:'failed',detail:'The configured webhook URL is invalid.'};}
+  if(webhook.protocol!=='https:')return {status:'failed',detail:'The emergency webhook must use HTTPS.'};
+  try{
+    const response=await fetch(webhook,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...payload,secret:process.env.EMERGENCY_WEBHOOK_SECRET}),signal:AbortSignal.timeout(20_000)});
+    const data=await response.json().catch(()=>null);
+    if(!response.ok||data?.ok!==true||data?.email?.status!=='accepted')return {status:'failed',detail:data?.error||`Webhook returned HTTP ${response.status}.`};
+    return {status:'accepted',detail:'Google Apps Script accepted the email request.'};
+  }catch(error){return {status:'failed',detail:error.name==='TimeoutError'?'Email webhook timed out.':`Email webhook failed: ${error.message}`};}
+}
+async function sendEmergencySms(payload) {
+  const {TWILIO_ACCOUNT_SID:sid,TWILIO_AUTH_TOKEN:token,TWILIO_FROM_NUMBER:from}=process.env;
+  if(!sid&&!token&&!from)return {status:'not_configured',detail:'Set up an SMS provider in .env to send SMS alerts.'};
+  if(!sid||!token||!from)return {status:'not_configured',detail:'Twilio setup is incomplete; provide SID, auth token, and sending number.'};
+  if(!payload.phones.length)return {status:'no_recipients',detail:'No emergency phone numbers are saved.'};
+  const results=await Promise.all(payload.phones.map(async to=>{
+    try{
+      const form=new URLSearchParams({To:to,From:from,Body:payload.smsText});
+      const response=await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`,{method:'POST',headers:{authorization:`Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`,'content-type':'application/x-www-form-urlencoded'},body:form,signal:AbortSignal.timeout(15_000)});
+      const data=await response.json().catch(()=>null);
+      return response.ok?{to,status:'accepted',sid:data?.sid??null}:{to,status:'failed',detail:data?.message||`Twilio returned HTTP ${response.status}.`};
+    }catch(error){return {to,status:'failed',detail:error.name==='TimeoutError'?'SMS request timed out.':`SMS request failed: ${error.message}`};}
+  }));
+  const accepted=results.filter(item=>item.status==='accepted').length;
+  return {status:accepted===results.length?'accepted':accepted?'partial':'failed',detail:`SMS provider accepted ${accepted} of ${results.length} message(s).`,results};
+}
 
+function payloadSafety(body,key){return body.safety?.[key]??'Not reported';}
+function payloadSensor(body,key){return body.sensor?.[key]??'Not reported';}
 async function api(request, response, url) {
   const method = request.method ?? 'GET';
   const path = url.pathname;
+
+  if(method==='POST'&&path==='/api/notifications/sos'){
+    sameOriginIfProvided(request);
+    const body=await readJson(request,16*1024);
+    const id=readString(body.event_id,'event_id',{min:8,max:80});
+    if(!/^[A-Za-z0-9_-]+$/.test(id))throw Object.assign(new Error('event_id has an invalid format.'),{status:400,code:'invalid_event_id'});
+    if(sosNotificationResults.has(id)){sendJson(response,200,{...sosNotificationResults.get(id),duplicate:true});return;}
+    if(sosNotificationInFlight.has(id)){const prior=await sosNotificationInFlight.get(id);sendJson(response,200,{...prior,duplicate:true});return;}
+    const lat=readFinite(body.latitude,'latitude',{min:-90,max:90,optional:true});
+    const lon=readFinite(body.longitude,'longitude',{min:-180,max:180,optional:true});
+    if((lat===null)!==(lon===null))throw Object.assign(new Error('latitude and longitude must be provided together.'),{status:400,code:'incomplete_location'});
+    const emails=validateAlertRecipients(body.emails,'emails',/^[^\s@]+@[^\s@]+\.[^\s@]+$/);
+    const phones=validateAlertRecipients(body.phones,'phones',/^\+[1-9]\d{7,14}$/);
+    const coords=lat===null?'GPS fix unavailable':`${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+    const mapsUrl=lat===null?'':`\nMap: https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`;
+    const occurredAt=readTimestamp(body.occurred_at,'occurred_at');
+    const smsText=`SAFE HER SOS: Device WSD_001 activated at ${occurredAt}. Location: ${coords}.${lat===null?'':` https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`} Please check on the user.`.slice(0,1500);
+    const payload={event_id:id,device_id:'WSD_001',occurred_at:occurredAt,emails,phones,latitude:lat,longitude:lon,location_text:coords,map_url:lat===null?'':`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`,sensor:body.sensor&&typeof body.sensor==='object'?body.sensor:{},safety:body.safety&&typeof body.safety==='object'?body.safety:{},email_subject:'🚨 SAFE HER SOS ALERT',email_text:`SAFE HER EMERGENCY ALERT\n\nSOS has been activated on device WSD_001.\nTime: ${occurredAt}\nLocation: ${coords}${mapsUrl}\n\nTouch: ${String(payloadSafety(body,'touch'))}\nFall detection: ${String(payloadSafety(body,'fallDetection'))}\nFreefall: ${String(payloadSafety(body,'freeFall'))}\nAcceleration: ${String(payloadSensor(body,'accelMagnitude'))} g\nTemperature: ${String(payloadSensor(body,'temperature'))} °C\n\nPlease contact the user and follow your emergency plan.`};
+    const delivery=Promise.all([sendEmergencyEmail(payload),sendEmergencySms({...payload,smsText})]).then(([email,sms])=>({event_id:id,email,sms}));
+    sosNotificationInFlight.set(id,delivery);
+    try{const result=await delivery;sosNotificationResults.set(id,result);if(sosNotificationResults.size>500)sosNotificationResults.delete(sosNotificationResults.keys().next().value);sendJson(response,200,result);}finally{sosNotificationInFlight.delete(id);}
+    return;
+  }
 
   if (method === 'GET' && path === '/api/config') {
     sendJson(response, 200, {

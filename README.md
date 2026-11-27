@@ -19,6 +19,8 @@ The dashboard reads the sketch's 115200-baud serial output directly. Real sensor
 | `PORT` | HTTP port. Defaults to `4173`. |
 | `NODE_ENV` | Set to `production` in production; this disables demo mode and enables secure cookies. |
 | `DEMO_MODE` | Set to `false` to disable the development simulator. Production mode disables it regardless. |
+| `EMERGENCY_WEBHOOK_URL` / `EMERGENCY_WEBHOOK_SECRET` | Google Apps Script webhook for emergency email alerts. |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` | Optional Twilio credentials and sender for real SMS alerts. |
 
 ## ESP32 USB setup
 
@@ -26,9 +28,9 @@ The integrated [ESP32 sketch](firmware/WomenSafetyESP32.ino) keeps its sensor, G
 
 ## Safety and delivery semantics
 
-- The dashboard does not generate sensor values or coordinates. Sensor readings and emergency contacts (including email addresses) are kept in this browser only; contacts can be edited, and email actions open a prefilled mail draft for manual sending. Clearing site data removes them. The Location tab shows an interactive OpenStreetMap and sends the current GPS coordinates to that map service to place its marker.
+- The dashboard does not generate sensor values or coordinates. Sensor readings and emergency contacts (including email addresses) are kept in this browser only; contacts can be edited. During an active USB dashboard session, SOS alerts are sent to the configured email webhook and SMS provider. Clearing site data removes saved readings and contacts. The Location tab shows an interactive OpenStreetMap and sends the current GPS coordinates to that map service to place its marker.
 - The site does not run the ML model. Activity labels/confidence are stored as predictions supplied by the ESP32 or inference service.
-- Emergency alerts begin as `queued`. The backend does not send SMS or make calls. Only a later device/network delivery report can move an alert to `sent`, `delivered`, or `failed`.
+- SOS notifications are attempted immediately when the serial stream changes to `SOS: ACTIVE`. Google Apps Script handles email; Twilio handles SMS when configured. The Emergency Center reports provider acceptance/failure accurately; provider acceptance does not guarantee final delivery. Notifications require the browser dashboard, USB serial, and local server to be running. Setup: [emergency notifications](docs/emergency-notifications.md).
 - Wi-Fi/GSM fallback is performed by ESP32 firmware. The web backend records the reported communication method and does not infer GSM availability.
 - USB serial is a direct local connection; this mode does not transmit sensor or location readings over Wi-Fi or to Supabase.
 

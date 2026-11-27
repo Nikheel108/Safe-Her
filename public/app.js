@@ -26,6 +26,7 @@ const state = {
   historySearch: '',
   historyFilter: 'all',
   contactEditingId: null,
+  sosDelivery: null,
   emergency: null,
   activity: '—',
   confidence: 0,
@@ -44,6 +45,7 @@ function restoreLocalState() {
     if(!state.series.length&&Array.isArray(saved.readingHistory))state.series=saved.readingHistory.map(r=>({x:Number(r.accelX),y:Number(r.accelY),z:Number(r.accelZ),t:Number(r.time)})).filter(r=>Number.isFinite(r.x)&&Number.isFinite(r.y)&&Number.isFinite(r.z)).slice(-120);
     if(Array.isArray(saved.readingHistory))state.readingHistory=saved.readingHistory.slice(-2000);
     if(Array.isArray(saved.contacts))state.contacts=saved.contacts;
+    if(saved.sosDelivery&&typeof saved.sosDelivery==='object')state.sosDelivery=saved.sosDelivery;
     state.events=[];
     state.demo=false;
     if(state.serial.latitude!=null&&state.serial.longitude!=null)state.coords={lat:Number(state.serial.latitude),lon:Number(state.serial.longitude),accuracy:state.serial.hdop==null?null:Number(state.serial.hdop)*5};
@@ -51,7 +53,7 @@ function restoreLocalState() {
   } catch { /* Ignore a damaged or unavailable local browser cache. */ }
 }
 function persistLocalState() {
-  try { localStorage.setItem('safeher-local-device',JSON.stringify({serial:state.serial,series:state.series.slice(-600),readingHistory:state.readingHistory.slice(-2000),contacts:state.contacts,events:state.events.slice(-200)})); }
+  try { localStorage.setItem('safeher-local-device',JSON.stringify({serial:state.serial,series:state.series.slice(-600),readingHistory:state.readingHistory.slice(-2000),contacts:state.contacts,events:state.events.slice(-200),sosDelivery:state.sosDelivery})); }
   catch { toast('Browser storage is full; latest readings may not persist.','error'); }
 }
 
@@ -296,11 +298,36 @@ function usbDevicePage() {
 }
 function usbEmergencyPage() {
  const d=state.serial,active=d.sos==='ACTIVE';
- return `<div class="page-heading"><div><div class="eyebrow">RESPONSE / SAFETY STATUS</div><h1>Emergency Center</h1><p>This page reflects the ESP32 touch and SOS logic; controls on the device activate and cancel SOS.</p></div><span class="badge ${active?'danger':'success'}">${active?'SOS ACTIVE':'NORMAL'}</span></div><div class="panel"><div class="section-title">CURRENT DEVICE SAFETY STATE</div><div class="safe-mark" style="margin-top:13px"><span class="safe-icon">${active?'!':'✓'}</span><span><strong>${active?'SOS activated on device':'No active SOS'}</strong><small>${state.usbConnected?'Live status from USB serial':'Last saved device status'} · Use the ESP32 touch sensor to activate or cancel.</small></span></div>${[['SOS',d.sos],['Touch sensor',d.touch],['Fall detection',d.fallDetection],['Freefall detected',d.freeFall],['Acceleration magnitude',d.accelMagnitude==null?null:`${d.accelMagnitude} g`],['GPS',d.latitude==null?'No fix':`${d.latitude}, ${d.longitude}`]].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">${active?'<button class="button button-danger" data-action="email-emergency">Prepare emergency email</button>':''}<a class="button" href="#location" data-navigate="location">Open device location →</a><a class="button" href="#activity" data-navigate="activity">Review fall signals →</a><a class="button" href="#history" data-navigate="history">SOS event history →</a></div></div>`;
+ const delivery=state.sosDelivery;
+ const deliveryLabel=value=>value==='accepted'?'Accepted by provider':value==='sending'?'Sending…':value==='failed'?'Failed':value==='not_configured'?'Not configured':value==='no_recipients'?'No recipient configured':value==='partial'?'Partially accepted':'No active alert';
+ return `<div class="page-heading"><div><div class="eyebrow">RESPONSE / SAFETY STATUS</div><h1>Emergency Center</h1><p>This page reflects the ESP32 touch and SOS logic; controls on the device activate and cancel SOS.</p></div><span class="badge ${active?'danger':'success'}">${active?'SOS ACTIVE':'NORMAL'}</span></div><div class="panel"><div class="section-title">CURRENT DEVICE SAFETY STATE</div><div class="safe-mark" style="margin-top:13px"><span class="safe-icon">${active?'!':'✓'}</span><span><strong>${active?'SOS activated on device':'No active SOS'}</strong><small>${state.usbConnected?'Live status from USB serial':'Last saved device status'} · Use the ESP32 touch sensor to activate or cancel.</small></span></div>${[['SOS',d.sos],['Touch sensor',d.touch],['Fall detection',d.fallDetection],['Freefall detected',d.freeFall],['Acceleration magnitude',d.accelMagnitude==null?null:`${d.accelMagnitude} g`],['GPS',d.latitude==null?'No fix':`${d.latitude}, ${d.longitude}`]].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}<div class="section-title" style="margin-top:16px">ALERT DELIVERY</div><div class="detail-row"><span>Email</span><strong>${delivery?deliveryLabel(delivery.email?.status):'Waiting for SOS'}</strong></div><div class="detail-row"><span>SMS</span><strong>${delivery?deliveryLabel(delivery.sms?.status):'Waiting for SOS'}</strong></div>${delivery?.email?.detail?`<p class="field-help">Email: ${esc(delivery.email.detail)}</p>`:''}${delivery?.sms?.detail?`<p class="field-help">SMS: ${esc(delivery.sms.detail)}</p>`:''}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">${active?'<button class="button button-quiet" data-action="email-emergency">Open email draft</button>':''}<a class="button" href="#location" data-navigate="location">Open device location →</a><a class="button" href="#activity" data-navigate="activity">Review fall signals →</a><a class="button" href="#history" data-navigate="history">SOS event history →</a></div></div>`;
 }
 function usbActivityPage() {
   const d=state.serial;
   return `<div class="page-heading"><div><div class="eyebrow">MONITORING / DEVICE LOGIC</div><h1>Activity Detection</h1><p>The current firmware reports freefall and impact detection; it does not classify walking or running.</p></div></div><div class="wide-grid"><div class="panel"><div class="section-title">LIVE SAFETY SIGNALS</div>${[['Acceleration magnitude',d.accelMagnitude==null?null:`${d.accelMagnitude} g`],['Fall detection',d.fallDetection],['Freefall detected',d.freeFall],['SOS',d.sos],['MPU sensor',d.mpuConnected?'Connected':'Disconnected']].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}</div><div class="panel"><div class="section-title">ACCELERATION HISTORY</div><p class="chart-sub">Actual acceleration magnitude reported by the MPU sensor.</p><canvas id="fall-chart" class="chart-canvas" aria-label="ESP32 acceleration magnitude over time"></canvas><div class="detail-row"><span>Current magnitude</span><strong>${d.accelMagnitude==null?'—':`${esc(d.accelMagnitude)} g`}</strong></div><div class="detail-row"><span>Temperature</span><strong>${d.temperature==null?'—':`${esc(d.temperature)} °C`}</strong></div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><a class="button" href="#emergency" data-navigate="emergency">Emergency center</a><a class="button" href="#history" data-navigate="history">Device history</a></div></div></div>`;
+}
+async function sendSosNotifications() {
+  const eventId=crypto.randomUUID();
+  state.sosDelivery={eventId,occurredAt:new Date().toISOString(),email:{status:'sending'},sms:{status:'sending'}};
+  persistLocalState();render({preserveInputs:true});
+  const d=state.serial;
+  const body={event_id:eventId,occurred_at:state.sosDelivery.occurredAt,emails:state.contacts.filter(c=>c.email).sort((a,b)=>Number(b.primary)-Number(a.primary)).map(c=>c.email),phones:state.contacts.filter(c=>c.phone).sort((a,b)=>Number(b.primary)-Number(a.primary)).map(c=>String(c.phone).replace(/[\s()-]/g,'')),latitude:d.latitude,longitude:d.longitude,sensor:{accelMagnitude:d.accelMagnitude,temperature:d.temperature},safety:{touch:d.touch,fallDetection:d.fallDetection,freeFall:d.freeFall}};
+  try {
+    const response=await fetch('/api/notifications/sos',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result?.error?.message||`Notification endpoint returned HTTP ${response.status}.`);
+    state.sosDelivery={...state.sosDelivery,...result};persistLocalState();
+    const email=result.email?.status==='accepted'?'Email submitted':`Email ${result.email?.status||'status unknown'}`;
+    const sms=result.sms?.status==='accepted'?'SMS submitted':`SMS ${result.sms?.status||'status unknown'}`;
+    toast(`SOS alert result — ${email}; ${sms}.`,result.email?.status==='accepted'||result.sms?.status==='accepted'?'success':'error');
+  } catch(error) {state.sosDelivery={...state.sosDelivery,email:{status:'failed',detail:error.message},sms:{status:'failed',detail:'Notification request failed before provider delivery.'}};persistLocalState();toast(`SOS notification failed: ${error.message}`,'error');}
+  render({preserveInputs:true});
+}
+function openEmergencyEmailDraft() {
+  const emails=state.contacts.filter(c=>c.email).map(c=>c.email);if(!emails.length){toast('Add an emergency contact with an email address first.','error');return;}
+  const d=state.serial,locationText=d.latitude==null?'GPS fix unavailable':`https://www.openstreetmap.org/?mlat=${d.latitude}&mlon=${d.longitude}#map=16/${d.latitude}/${d.longitude}`;
+  const body=`Safe Her reports SOS ACTIVE at ${new Date().toLocaleString()}.\nLocation: ${locationText}\nPlease check on the user.`;
+  window.location.href=`mailto:${emails.map(encodeURIComponent).join(',')}?subject=${encodeURIComponent('Safe Her emergency alert')}&body=${encodeURIComponent(body)}`;
 }
 function parseSerialLine(source) {
   const line=source.trim(); if(!line)return;
@@ -326,7 +353,7 @@ function parseSerialLine(source) {
   if((m=line.match(/^Touch state:\s*(.*)$/i)))d.touch=m[1];
   if((m=line.match(/^Buzzer:\s*(.*)$/i)))d.buzzer=m[1];
   if((m=line.match(/^LED:\s*(.*)$/i)))d.led=m[1];
-  if((m=line.match(/^SOS:\s*(.*)$/i))){d.sos=m[1];state.emergency=m[1].toUpperCase()==='ACTIVE'?{type:'ESP32 SOS',source:'Device safety logic',time:new Date()}:null;}
+  if((m=line.match(/^SOS:\s*(.*)$/i))){const wasActive=d.sos==='ACTIVE',isActive=m[1].trim().toUpperCase()==='ACTIVE';d.sos=isActive?'ACTIVE':m[1];state.emergency=isActive?{type:'ESP32 SOS',source:'Device safety logic',time:new Date()}:null;if(isActive&&(!wasActive||!state.sosDelivery))void sendSosNotifications();}
   if((m=line.match(/^Fall detection:\s*(.*)$/i)))d.fallDetection=m[1];
   if((m=line.match(/^Freefall detected:\s*(.*)$/i)))d.freeFall=m[1];
   if((m=line.match(/^Cancel hold:\s*(.*)$/i)))d.cancelHold=m[1];
@@ -382,7 +409,7 @@ function action(name, id) {
   }
   if (name === 'contact-edit') {state.contactEditingId=Number(id);render();return;}
   if (name === 'contact-cancel-edit') {state.contactEditingId=null;render();return;}
-  if (name === 'email-emergency') {const emails=state.contacts.filter(c=>c.email).sort((a,b)=>Number(b.primary)-Number(a.primary)).map(c=>c.email);if(!emails.length){toast('Add an emergency contact with an email address first.','error');return;}const gps=state.serial.latitude!=null?`\nGPS: https://www.openstreetmap.org/?mlat=${state.serial.latitude}&mlon=${state.serial.longitude}#map=16/${state.serial.latitude}/${state.serial.longitude}`:'';const body=`Safe Her reports SOS ACTIVE at ${new Date().toLocaleString()}.${gps}\n\nPlease check in now.`;location.href=`mailto:${emails.map(encodeURIComponent).join(',')}?subject=${encodeURIComponent('Safe Her emergency alert')}&body=${encodeURIComponent(body)}`;return;}
+  if (name === 'email-emergency') {openEmergencyEmailDraft();return;}
   if (name === 'contact-delete') { state.contacts = state.contacts.filter(c => c.id !== Number(id)); persistLocalState(); toast('Contact removed from this browser.'); render(); return; }
   if (name === 'contact-primary') { state.contacts.forEach(c => c.primary = c.id === Number(id)); persistLocalState(); render(); return; }
   if (name === 'theme-toggle') { setTheme(state.theme==='light'?'dark':'light'); render(); return; }

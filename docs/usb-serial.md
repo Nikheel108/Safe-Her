@@ -15,6 +15,10 @@ The sketch and dashboard both use **115200 baud**. The dashboard updates after e
 
 The page shows MPU connection and identity, accelerometer axes and magnitude, gyroscope axes, temperature, GPS satellite count and HDOP, coordinates and location age, altitude, speed, GPS time, touch state, buzzer and LED state, SOS state, fall detection, freefall, and cancel-hold progress.
 
-GPS fields stay unavailable until the ESP32 reports a fix. The Location tab shows an interactive OpenStreetMap at that reported position (map tiles and coordinates are requested from OpenStreetMap). Sensor status reports, a bounded history, and editable emergency contacts (including email addresses) are saved to this browser's local storage. SOS email actions open a prefilled draft in the user's mail app for manual sending; this local-only dashboard cannot send mail itself. Disconnecting USB keeps the most recent saved readings visible; reconnecting starts live updates again. Data remains on this browser and is not sent to the project backend.
+GPS fields stay unavailable until the ESP32 reports a fix. The Location tab shows an interactive OpenStreetMap at that reported position (map tiles and coordinates are requested from OpenStreetMap). Sensor status reports, a bounded history, and editable emergency contacts (including email addresses) are saved to this browser's local storage. When configured, SOS email is submitted to Google Apps Script and SMS to Twilio; the local serial page reports the provider result rather than claiming delivery. Disconnecting USB keeps the most recent saved readings visible; reconnecting starts live updates again. Data remains on this browser and is not sent to the project backend.
 
 If the browser does not offer serial ports, use Chrome or Edge at `localhost`, make sure the board is connected and its USB driver is installed, and close Serial Monitor before trying again.
+
+## SOS email and SMS alerts
+
+When the serial stream changes to `SOS: ACTIVE`, the dashboard posts one alert to the local server. Configure [Google Apps Script email and optional Twilio SMS](emergency-notifications.md). Keep the dashboard open with the ESP32 connected; a browser-only USB reader cannot detect an SOS while it is closed or disconnected. The Emergency Center distinguishes provider acceptance from confirmed delivery.
