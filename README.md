@@ -26,7 +26,7 @@ The integrated [ESP32 sketch](firmware/WomenSafetyESP32.ino) keeps its sensor, G
 
 ## Safety and delivery semantics
 
-- The dashboard does not generate sensor values or coordinates. Sensor readings and contacts are kept in this browser only; clearing site data removes them. The Location tab shows an interactive OpenStreetMap and sends the current GPS coordinates to that map service to place its marker.
+- The dashboard does not generate sensor values or coordinates. Sensor readings and emergency contacts (including email addresses) are kept in this browser only; contacts can be edited, and email actions open a prefilled mail draft for manual sending. Clearing site data removes them. The Location tab shows an interactive OpenStreetMap and sends the current GPS coordinates to that map service to place its marker.
 - The site does not run the ML model. Activity labels/confidence are stored as predictions supplied by the ESP32 or inference service.
 - Emergency alerts begin as `queued`. The backend does not send SMS or make calls. Only a later device/network delivery report can move an alert to `sent`, `delivered`, or `failed`.
 - Wi-Fi/GSM fallback is performed by ESP32 firmware. The web backend records the reported communication method and does not infer GSM availability.

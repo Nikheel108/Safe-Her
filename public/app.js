@@ -25,6 +25,7 @@ const state = {
   chartRangeMins: 1,
   historySearch: '',
   historyFilter: 'all',
+  contactEditingId: null,
   emergency: null,
   activity: '—',
   confidence: 0,
@@ -191,10 +192,13 @@ function applySosVisual() {
   const banner=document.querySelector('#sos-alert-banner');
   if(banner){banner.hidden=!active;banner.textContent=active?'SOS ACTIVE · The ESP32 reports an active emergency. Use the device touch control to cancel.':'';}
 }
-function render() {
+function render({preserveInputs=false}={}) {
+  const focusedId=preserveInputs&&content.contains(document.activeElement)?document.activeElement.id:null;
+  const inputState=preserveInputs?Array.from(content.querySelectorAll('input,select,textarea')).map(el=>({id:el.id,value:el.value,checked:el.checked,start:typeof el.selectionStart==='number'?el.selectionStart:null,end:typeof el.selectionEnd==='number'?el.selectionEnd:null})):[];
   if (!renderers[state.page]) state.page = 'overview';
   const usbPages={overview:usbOverviewPage,live:serialDashboardPage,location:usbLocationPage,emergency:usbEmergencyPage,activity:usbActivityPage,contacts:usbContactsPage,history:usbHistoryPage,device:usbDevicePage,settings:usbSettingsPage};
   content.innerHTML = usbPages[state.page]();
+  for(const saved of inputState){const el=document.getElementById(saved.id);if(el){el.value=saved.value;if(el.type==='checkbox')el.checked=saved.checked;}}
   if(state.page==='location')initializeLocationMap();
   applySosVisual();
   document.querySelector('#breadcrumb-current').textContent = pageNames[state.page];
@@ -206,6 +210,7 @@ function render() {
   connection.querySelector('span').textContent = state.usbConnected ? 'USB serial connected' : 'USB disconnected';
   const usbButton=document.querySelector('#usb-connect'); if(usbButton)usbButton.textContent=state.usbConnected?'Disconnect USB':'Connect ESP32 USB';
   drawChart(); drawFallChart(); bindPageActions();
+  if(focusedId){const el=document.getElementById(focusedId);if(el){el.focus({preventScroll:true});if(inputState[0]?.start!=null&&typeof el.setSelectionRange==='function'){const saved=inputState.find(x=>x.id===focusedId);if(saved?.start!=null)el.setSelectionRange(saved.start,saved.end);}}}
 }
 function liveDashboardPage() {
   const data=state.live, sensor=data?.latest_sensor, loc=data?.latest_location, status=data?.status;
@@ -271,7 +276,9 @@ function usbOverviewPage() {
  return `<div class="page-heading"><div><div class="eyebrow">SAFE HER / DEVICE DASHBOARD</div><h1>Overview</h1><p>Actual values from the ESP32 USB serial report. No sample data is generated.</p></div><span class="badge ${state.usbConnected?'success':''}">${state.usbConnected?'USB LIVE':'USB DISCONNECTED'}</span></div><div class="status-grid">${values.map(([k,v])=>`<article class="status-card"><div class="status-top">${k}</div><div class="status-main">${esc(v)}</div><div class="status-sub">${state.usbConnected?'Current device report':'Last saved device report'}</div></article>`).join('')}</div>${has?`<div class="section-row charts-grid">${chartMarkup()}<div class="panel"><div class="section-title">LATEST SENSOR READINGS</div>${[['Accel X',d.accelX,'g'],['Accel Y',d.accelY,'g'],['Accel Z',d.accelZ,'g'],['Gyro X',d.gyroX,'°/s'],['Gyro Y',d.gyroY,'°/s'],['Gyro Z',d.gyroZ,'°/s'],['Temperature',d.temperature,'°C']].map(([k,v,u])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':`${esc(v)} ${u}`}</strong></div>`).join('')}</div></div>`:'<div class="panel empty-state section-row">No ESP32 status report yet. Connect the device to populate the overview and graphs.</div>'}<div class="section-row"><a class="button" href="#live" data-navigate="live">Open Live Monitoring →</a> <a class="button" href="#location" data-navigate="location">Open GPS location →</a> <a class="button" href="#history" data-navigate="history">Review local history →</a></div>`;
 }
 function usbContactsPage() {
- return `<div class="page-heading"><div><div class="eyebrow">RESPONSE / TRUSTED PEOPLE</div><h1>Emergency Contacts</h1><p>Contacts are stored in this browser only. The dashboard does not send notifications.</p></div></div><div class="wide-grid"><div class="panel"><div class="section-title">SAVED CONTACTS (${state.contacts.length})</div>${state.contacts.map(c=>`<div class="detail-card contact-card"><span class="contact-avatar">${esc(c.name.slice(0,2).toUpperCase())}</span><span class="contact-info"><strong>${esc(c.name)} ${c.primary?'<span class="badge success">PRIMARY</span>':''}</strong><small>${esc(c.relationship)} · ${esc(c.phone)}</small></span><span class="contact-actions"><button class="button" data-action="contact-primary" data-id="${c.id}">${c.primary?'Primary':'Set primary'}</button><button class="button" data-action="contact-delete" data-id="${c.id}">Remove</button></span></div>`).join('')||'<div class="empty-state">No contacts saved.</div>'}</div><form class="panel" id="contact-form"><div class="section-title">ADD CONTACT</div><div class="form-grid"><div class="form-field"><label for="contact-name">Name</label><input id="contact-name" name="name" required maxlength="60"></div><div class="form-field"><label for="contact-phone">Phone</label><input id="contact-phone" name="phone" required inputmode="tel" placeholder="+91 98765 43210"></div><div class="form-field"><label for="contact-relationship">Relationship</label><input id="contact-relationship" name="relationship" required maxlength="40"></div><div class="form-field"><label for="contact-priority">Priority</label><select id="contact-priority" name="priority"><option>1</option><option>2</option><option>3</option></select></div></div><button class="button button-primary" style="margin-top:13px" type="submit">Save contact locally</button></form></div>`;
+ const editing=state.contacts.find(c=>c.id===state.contactEditingId)||null;
+ const mailUrl=email=>`mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent('Safe Her emergency contact')}`;
+ return `<div class="page-heading"><div><div class="eyebrow">RESPONSE / TRUSTED PEOPLE</div><h1>Emergency Contacts</h1><p>Contact information is saved in this browser. Email links open your mail app; the dashboard does not send mail.</p></div></div><div class="wide-grid"><div class="panel"><div class="section-title">SAVED CONTACTS (${state.contacts.length})</div>${state.contacts.map(c=>`<div class="detail-card contact-card"><span class="contact-avatar">${esc(c.name.slice(0,2).toUpperCase())}</span><span class="contact-info"><strong>${esc(c.name)} ${c.primary?'<span class="badge success">PRIMARY</span>':''}</strong><small>${esc(c.relationship)} · ${esc(c.phone)} · ${esc(c.email||'Email not added')}</small></span><span class="contact-actions">${c.email?`<a class="button" href="${esc(mailUrl(c.email))}">Email</a>`:''}<button class="button" data-action="contact-primary" data-id="${c.id}" ${c.primary?'disabled':''}>${c.primary?'Primary':'Set primary'}</button><button class="button" data-action="contact-edit" data-id="${c.id}">Edit</button><button class="button" data-action="contact-delete" data-id="${c.id}">Remove</button></span></div>`).join('')||'<div class="empty-state">No contacts saved. Add a trusted contact using the form.</div>'}</div><form class="panel" id="contact-form"><div class="section-header"><span class="section-title">${editing?'EDIT CONTACT':'ADD CONTACT'}</span>${editing?'<button type="button" class="button" data-action="contact-cancel-edit">Cancel edit</button>':''}</div><div class="form-grid"><div class="form-field"><label for="contact-name">Name</label><input id="contact-name" name="name" value="${esc(editing?.name||'')}" required maxlength="60" autocomplete="name"></div><div class="form-field"><label for="contact-phone">Phone</label><input id="contact-phone" name="phone" value="${esc(editing?.phone||'')}" required inputmode="tel" placeholder="+91 98765 43210" autocomplete="tel"></div><div class="form-field"><label for="contact-email">Emergency email</label><input id="contact-email" name="email" value="${esc(editing?.email||'')}" type="email" required maxlength="254" placeholder="name@example.com" autocomplete="email"></div><div class="form-field"><label for="contact-relationship">Relationship</label><input id="contact-relationship" name="relationship" value="${esc(editing?.relationship||'')}" required maxlength="40" placeholder="Family, friend…"></div><div class="form-field"><label for="contact-priority">Priority</label><select id="contact-priority" name="priority">${[1,2,3,4,5].map(n=>`<option value="${n}" ${(editing?.priority||1)===n?'selected':''}>${n}</option>`).join('')}</select></div></div><button class="button button-primary" style="margin-top:13px" type="submit">${editing?'Save contact changes':'Save contact locally'}</button></form></div>`;
 }
 function usbSettingsPage() {
  const size=new Blob([localStorage.getItem('safeher-local-device')||'']).size;
@@ -289,7 +296,7 @@ function usbDevicePage() {
 }
 function usbEmergencyPage() {
  const d=state.serial,active=d.sos==='ACTIVE';
- return `<div class="page-heading"><div><div class="eyebrow">RESPONSE / SAFETY STATUS</div><h1>Emergency Center</h1><p>This page reflects the ESP32 touch and SOS logic; controls on the device activate and cancel SOS.</p></div><span class="badge ${active?'danger':'success'}">${active?'SOS ACTIVE':'NORMAL'}</span></div><div class="panel"><div class="section-title">CURRENT DEVICE SAFETY STATE</div><div class="safe-mark" style="margin-top:13px"><span class="safe-icon">${active?'!':'✓'}</span><span><strong>${active?'SOS activated on device':'No active SOS'}</strong><small>${state.usbConnected?'Live status from USB serial':'Last saved device status'} · Use the ESP32 touch sensor to activate or cancel.</small></span></div>${[['SOS',d.sos],['Touch sensor',d.touch],['Fall detection',d.fallDetection],['Freefall detected',d.freeFall],['Acceleration magnitude',d.accelMagnitude==null?null:`${d.accelMagnitude} g`],['GPS',d.latitude==null?'No fix':`${d.latitude}, ${d.longitude}`]].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px"><a class="button" href="#location" data-navigate="location">Open device location →</a><a class="button" href="#activity" data-navigate="activity">Review fall signals →</a><a class="button" href="#history" data-navigate="history">SOS event history →</a></div></div>`;
+ return `<div class="page-heading"><div><div class="eyebrow">RESPONSE / SAFETY STATUS</div><h1>Emergency Center</h1><p>This page reflects the ESP32 touch and SOS logic; controls on the device activate and cancel SOS.</p></div><span class="badge ${active?'danger':'success'}">${active?'SOS ACTIVE':'NORMAL'}</span></div><div class="panel"><div class="section-title">CURRENT DEVICE SAFETY STATE</div><div class="safe-mark" style="margin-top:13px"><span class="safe-icon">${active?'!':'✓'}</span><span><strong>${active?'SOS activated on device':'No active SOS'}</strong><small>${state.usbConnected?'Live status from USB serial':'Last saved device status'} · Use the ESP32 touch sensor to activate or cancel.</small></span></div>${[['SOS',d.sos],['Touch sensor',d.touch],['Fall detection',d.fallDetection],['Freefall detected',d.freeFall],['Acceleration magnitude',d.accelMagnitude==null?null:`${d.accelMagnitude} g`],['GPS',d.latitude==null?'No fix':`${d.latitude}, ${d.longitude}`]].map(([k,v])=>`<div class="detail-row"><span>${k}</span><strong>${v==null?'—':esc(v)}</strong></div>`).join('')}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">${active?'<button class="button button-danger" data-action="email-emergency">Prepare emergency email</button>':''}<a class="button" href="#location" data-navigate="location">Open device location →</a><a class="button" href="#activity" data-navigate="activity">Review fall signals →</a><a class="button" href="#history" data-navigate="history">SOS event history →</a></div></div>`;
 }
 function usbActivityPage() {
   const d=state.serial;
@@ -324,7 +331,7 @@ function parseSerialLine(source) {
   if((m=line.match(/^Freefall detected:\s*(.*)$/i)))d.freeFall=m[1];
   if((m=line.match(/^Cancel hold:\s*(.*)$/i)))d.cancelHold=m[1];
   if(line.includes('[ SYSTEM STATUS ]'))d.inSystemStatus=true;
-  if(d.inSystemStatus&&/^=+/.test(line)){d.inSystemStatus=false;d.updatedAt=Date.now();state.readingHistory.push({...d,time:d.updatedAt,logs:undefined});if(state.readingHistory.length>2000)state.readingHistory.shift();persistLocalState();applySosVisual();if(state.page==='location'&&document.querySelector('#osm-location-map'))updateLocationValues();else render();}
+  if(d.inSystemStatus&&/^=+/.test(line)){d.inSystemStatus=false;d.updatedAt=Date.now();state.readingHistory.push({...d,time:d.updatedAt,logs:undefined});if(state.readingHistory.length>2000)state.readingHistory.shift();persistLocalState();applySosVisual();if(state.page==='location'&&document.querySelector('#osm-location-map'))updateLocationValues();else render({preserveInputs:true});}
 }
 async function connectUsb() {
   if(state.usbConnected){await state.serialReader?.cancel();return;}
@@ -373,6 +380,9 @@ function action(name, id) {
     if (!state.demo) { state.events = []; state.contacts = []; state.emergency = null; }
     toast(state.demo ? 'Demo mode enabled. Readings are illustrative.' : 'Live mode selected. Sign in to view saved device data.'); render(); return;
   }
+  if (name === 'contact-edit') {state.contactEditingId=Number(id);render();return;}
+  if (name === 'contact-cancel-edit') {state.contactEditingId=null;render();return;}
+  if (name === 'email-emergency') {const emails=state.contacts.filter(c=>c.email).sort((a,b)=>Number(b.primary)-Number(a.primary)).map(c=>c.email);if(!emails.length){toast('Add an emergency contact with an email address first.','error');return;}const gps=state.serial.latitude!=null?`\nGPS: https://www.openstreetmap.org/?mlat=${state.serial.latitude}&mlon=${state.serial.longitude}#map=16/${state.serial.latitude}/${state.serial.longitude}`:'';const body=`Safe Her reports SOS ACTIVE at ${new Date().toLocaleString()}.${gps}\n\nPlease check in now.`;location.href=`mailto:${emails.map(encodeURIComponent).join(',')}?subject=${encodeURIComponent('Safe Her emergency alert')}&body=${encodeURIComponent(body)}`;return;}
   if (name === 'contact-delete') { state.contacts = state.contacts.filter(c => c.id !== Number(id)); persistLocalState(); toast('Contact removed from this browser.'); render(); return; }
   if (name === 'contact-primary') { state.contacts.forEach(c => c.primary = c.id === Number(id)); persistLocalState(); render(); return; }
   if (name === 'theme-toggle') { setTheme(state.theme==='light'?'dark':'light'); render(); return; }
@@ -383,10 +393,14 @@ function action(name, id) {
   if (name === 'help') { toast('Support resources will be available when account services are connected.'); return; }
 }
 function addContact(event) {
-  event.preventDefault(); const data = new FormData(event.currentTarget), phone = String(data.get('phone')).replace(/[\s()-]/g, '').replace(/^\+91/, '');
-  if (!/^[6-9]\d{9}$/.test(phone)) { toast('Enter a valid 10-digit Indian mobile number.', 'error'); document.querySelector('#contact-phone').focus(); return; }
-  const contact = { id: Date.now(), name: String(data.get('name')).trim(), relationship: String(data.get('relationship')).trim(), phone: `+91 ${phone}`, priority: Number(data.get('priority')), active: true, primary: state.contacts.length === 0 };
-  state.contacts.push(contact); persistLocalState(); toast('Contact saved in this browser.'); render();
+  event.preventDefault();const data=new FormData(event.currentTarget),phone=String(data.get('phone')).replace(/[\s()-]/g,'').replace(/^\+91/,''),email=String(data.get('email')).trim().toLowerCase();
+  if(!/^[6-9]\d{9}$/.test(phone)){toast('Enter a valid 10-digit Indian mobile number.','error');document.querySelector('#contact-phone').focus();return;}
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){toast('Enter a valid emergency email address.','error');document.querySelector('#contact-email').focus();return;}
+  const current=state.contacts.find(c=>c.id===state.contactEditingId);
+  const contact={id:current?.id||Date.now(),name:String(data.get('name')).trim(),relationship:String(data.get('relationship')).trim(),phone:`+91 ${phone}`,email,priority:Number(data.get('priority')),active:true,primary:current?.primary??state.contacts.length===0};
+  if(current){state.contacts=state.contacts.map(c=>c.id===current.id?contact:c);state.contactEditingId=null;toast('Emergency contact updated locally.');}
+  else{state.contacts.push(contact);toast('Emergency contact saved locally.');}
+  persistLocalState();render();
 }
 function saveSettings(event) {
   event.preventDefault(); const data = new FormData(event.currentTarget); state.demo = state.demoAllowed && data.get('demo') === 'on';
