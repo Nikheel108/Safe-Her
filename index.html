@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-    <link rel="stylesheet" href="/public/styles.css?v=sidebar-compact-20261127-6" />
+    <link rel="stylesheet" href="/public/styles.css?v=assistant-widget-20261127-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -48,8 +48,17 @@
       <div class="mobile-overlay" id="mobile-overlay"></div>
     </div>
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <section class="safeher-chat" id="safeher-chat" aria-label="Safe Her assistant">
+      <button class="chat-launcher" id="chat-launcher" type="button" aria-label="Open Safe Her assistant" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H6l-3 2v-5.2A7.5 7.5 0 1 1 20 11.5Z"/><path d="M8 11h.01M12 11h.01M16 11h.01"/></svg></button>
+      <div class="chat-panel" id="chat-panel" hidden>
+        <header class="chat-header"><span class="chat-avatar" aria-hidden="true">✦</span><span><strong>Safe Her Assistant</strong><small>Answers about your dashboard</small></span><button id="chat-close" class="chat-close" type="button" aria-label="Close assistant">×</button></header>
+        <div class="chat-messages" id="chat-messages" role="log" aria-live="polite"><div class="chat-message assistant-message">Hi! Ask me about SOS, device status, emergency contacts, or your latest location.</div></div>
+        <div class="chat-suggestions"><button type="button" data-chat-prompt="Where is my device?">My location</button><button type="button" data-chat-prompt="How do I update a number?">Update a number</button></div>
+        <form class="chat-form" id="chat-form"><label class="sr-only" for="chat-input">Ask Safe Her Assistant</label><input id="chat-input" type="text" maxlength="300" placeholder="Ask about Safe Her…" autocomplete="off" required><button type="submit" aria-label="Send message"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 18-8-8 18-2-8-8-2Z"/><path d="m11 13 5-5"/></svg></button></form>
+      </div>
+    </section>
     <dialog class="confirm-dialog" id="confirm-dialog"><form method="dialog"><div class="dialog-mark">!</div><h2 id="dialog-title">Trigger a demo SOS?</h2><p id="dialog-copy">This only creates a local demo event. No real contacts will be notified.</p><div class="dialog-actions"><button class="button button-quiet" value="cancel">Cancel</button><button class="button button-danger" id="dialog-confirm" value="confirm">Trigger demo SOS</button></div></form></dialog>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script type="module" src="/public/app.js?v=manual-sos-usb-20261127-1"></script>
+    <script type="module" src="/public/app.js?v=assistant-widget-20261127-1"></script>
   </body>
 </html>

@@ -47,6 +47,7 @@ const state = {
   series: [],
   events: [],
   contacts: [],
+  sharedSosActive: false,
 };
 const csvReadingFields=['time','updatedAt','mpuConnected','whoAmI','accelX','accelY','accelZ','accelMagnitude','gyroX','gyroY','gyroZ','temperature','gpsCharacters','satellites','hdop','latitude','longitude','locationStatus','locationAge','altitude','speed','gpsDateTime','touch','buzzer','led','sos','fallDetection','freeFall','cancelHold'];
 let csvWriteQueue=Promise.resolve();
@@ -276,10 +277,30 @@ function drawChart() {
   colors.forEach((color, line) => { ctx.beginPath(); points.forEach((point, i) => { const value = [point.x, point.y, point.z][line]; const x = pad.left + i * (w - pad.left - pad.right) / Math.max(1,points.length - 1); const y = pad.top + (1 - (value + 1.5) / 3) * (h - pad.top - pad.bottom); if (!i) ctx.moveTo(x,y); else ctx.lineTo(x,y); }); ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.stroke(); });
 }
 function applySosVisual() {
-  const active=state.serial.sos==='ACTIVE';
+  const active=state.serial.sos==='ACTIVE'||state.sharedSosActive;
   document.documentElement.classList.toggle('sos-active',active);
   const banner=document.querySelector('#sos-alert-banner');
   if(banner){banner.hidden=!active;banner.textContent=active?'SOS ACTIVE · The ESP32 reports an active emergency. Use the device touch control to cancel.':'';}
+}
+let sosAudioContext=null;
+function playSosAlarm(){
+  try{
+    const AudioContextClass=window.AudioContext||window.webkitAudioContext;if(!AudioContextClass)return;
+    sosAudioContext??=new AudioContextClass();void sosAudioContext.resume();
+    const start=sosAudioContext.currentTime;
+    for(let i=0;i<6;i++){
+      const oscillator=sosAudioContext.createOscillator(),gain=sosAudioContext.createGain(),at=start+i*.42;
+      oscillator.type='sawtooth';oscillator.frequency.setValueAtTime(i%2?740:960,at);
+      gain.gain.setValueAtTime(.0001,at);gain.gain.exponentialRampToValueAtTime(.16,at+.025);gain.gain.exponentialRampToValueAtTime(.0001,at+.32);
+      oscillator.connect(gain);gain.connect(sosAudioContext.destination);oscillator.start(at);oscillator.stop(at+.34);
+    }
+  }catch{}
+}
+function setSharedSos(active,{announce=false}={}){
+  state.sharedSosActive=active;
+  try{localStorage.setItem('safeher-sos-status',JSON.stringify({active,updatedAt:Date.now(),source:active?'Safe Her SOS':'Safe Her'}));}catch{}
+  applySosVisual();
+  if(announce&&active)playSosAlarm();
 }
 function render({preserveInputs=false}={}) {
   const focusedId=preserveInputs&&content.contains(document.activeElement)?document.activeElement.id:null;
@@ -641,7 +662,7 @@ function parseSerialLine(source) {
   if((m=line.match(/^Touch state:\s*(.*)$/i)))d.touch=m[1];
   if((m=line.match(/^Buzzer:\s*(.*)$/i)))d.buzzer=m[1];
   if((m=line.match(/^LED:\s*(.*)$/i)))d.led=m[1];
-  if((m=line.match(/^SOS:\s*(.*)$/i))){const wasActive=d.sos==='ACTIVE',isActive=m[1].trim().toUpperCase()==='ACTIVE';d.sos=isActive?'ACTIVE':m[1];if(isActive&&!wasActive){state.emergency={type:'ESP32 SOS',source:'Device safety logic',time:new Date()};void sendSosNotifications();}else if(isActive){state.emergency??={type:'ESP32 SOS',source:'Device safety logic',time:new Date(d.updatedAt||Date.now())};}else state.emergency=null;}
+  if((m=line.match(/^SOS:\s*(.*)$/i))){const wasActive=d.sos==='ACTIVE',isActive=m[1].trim().toUpperCase()==='ACTIVE';d.sos=isActive?'ACTIVE':m[1];if(isActive&&!wasActive){state.emergency={type:'ESP32 SOS',source:'Device safety logic',time:new Date()};setSharedSos(true,{announce:true});void sendSosNotifications();}else if(isActive){state.emergency??={type:'ESP32 SOS',source:'Device safety logic',time:new Date(d.updatedAt||Date.now())};}else{state.emergency=null;setSharedSos(false);}}
   if((m=line.match(/^Fall detection:\s*(.*)$/i)))d.fallDetection=m[1];
   if((m=line.match(/^Freefall detected:\s*(.*)$/i)))d.freeFall=m[1];
   if((m=line.match(/^Cancel hold:\s*(.*)$/i)))d.cancelHold=m[1];
@@ -682,14 +703,14 @@ function action(name, id) {
     document.querySelector('#dialog-copy').textContent = 'This creates a local demo event only. No calls or SMS messages will be sent.';
     const confirm = document.querySelector('#dialog-confirm'); confirm.textContent = 'Trigger demo SOS';
     confirm.classList.remove('button-primary'); confirm.classList.add('button-danger');
-    confirm.onclick = () => { state.emergency = { type: 'Manual SOS', source: 'Demo touch sensor', time: new Date() }; logEvent('Demo SOS triggered', 'Local preview · no notifications sent', 'alert'); toast('Demo SOS created. No one was contacted.'); setTimeout(render, 0); };
+    confirm.onclick = () => { state.emergency = { type: 'Manual SOS', source: 'Demo touch sensor', time: new Date() }; setSharedSos(true,{announce:true}); logEvent('Demo SOS triggered', 'Local preview · no notifications sent', 'alert'); toast('Demo SOS created. No one was contacted.'); setTimeout(render, 0); };
     dialog.showModal(); return;
   }
   if (name === 'resolve-emergency') {
     if (!state.emergency) return;
     const dialog = document.querySelector('#confirm-dialog'); document.querySelector('#dialog-title').textContent = 'Resolve this demo event?'; document.querySelector('#dialog-copy').textContent = 'The event will be marked resolved in this page preview. No external alerts are affected.';
     const confirm = document.querySelector('#dialog-confirm'); confirm.textContent = 'Resolve demo event'; confirm.classList.add('button-primary');
-    confirm.onclick = () => { logEvent('Demo emergency resolved', 'Resolved in local preview', 'alert'); state.emergency = null; toast('Demo event resolved.'); setTimeout(render, 0); };
+    confirm.onclick = () => { logEvent('Demo emergency resolved', 'Resolved in local preview', 'alert'); state.emergency = null; setSharedSos(false); toast('Demo event resolved.'); setTimeout(render, 0); };
     dialog.showModal(); return;
   }
   if (name === 'acknowledge') { logEvent('Demo alert acknowledged', 'Acknowledged in local preview', 'alert'); toast('Demo alert acknowledged.'); render(); return; }
@@ -839,6 +860,40 @@ function drawFallChart() {
   ctx.beginPath();points.forEach((r,i)=>{const x=pad+i*(w-pad-8)/Math.max(1,points.length-1),y=h-pad-(Number(r.accelMagnitude)-min)/span*(h-2*pad);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
   ctx.strokeStyle='#d95691';ctx.lineWidth=2;ctx.stroke();
 }
+function safeHerAnswer(question){
+  const q=question.toLowerCase().replace(/[^a-z0-9@.+ -]/g,' '),d=state.serial||{};
+  if(/\b(hi|hello|hey)\b/.test(q))return {text:'Hello! I can help with Safe Her SOS, device status, fall detection, emergency contacts, and the latest GPS location.'};
+  if(/\b(map|where|location|gps|coordinates|address)\b/.test(q)){
+    const loc=state.live?.latest_location;
+    const lat=Number(d.latitude??loc?.latitude),lon=Number(d.longitude??loc?.longitude);
+    if(Number.isFinite(lat)&&Number.isFinite(lon)&&((d.latitude!=null&&d.longitude!=null)||loc))return {text:`Latest device coordinates: ${lat.toFixed(6)}, ${lon.toFixed(6)}. Open the point in Google Maps:`,link:`https://www.google.com/maps?q=${encodeURIComponent(`${lat},${lon}`)}`,label:'Open device location ↗'};
+    return {text:'There is no GPS fix available yet, so I can’t provide a reliable map link. Connect the ESP32 and wait for a GPS fix, then ask me again.'};
+  }
+  if(/\b(update|change|edit|add|number|phone|contact|mobile)\b/.test(q)){
+    const contacts=state.contacts||[];
+    if(/\b(my|saved|current|what is|what's)\b/.test(q)&&contacts.length){return {text:`Emergency contacts saved in this browser:\n${contacts.map(c=>`${c.name}: ${c.phone||'no phone saved'}`).join('\n')}\nYou can edit a contact from the Emergency Contacts page.` ,link:'#contacts',label:'Open emergency contacts →'};}
+    return {text:'You can add or change an emergency contact from Emergency Contacts. Open the page, choose Edit on the contact, update the phone number, and save. Changes are stored in this browser.',link:'#contacts',label:'Manage emergency contacts →'};
+  }
+  if(/\b(fall|freefall|impact|detect)\b/.test(q))return {text:'The ESP32 firmware detects a possible fall when acceleration drops below 0.65 g, then rises above 2.5 g within 1.5 seconds. That sequence activates SOS. This is threshold-based detection.'};
+  if(/\b(sos|emergency|alert|buzzer|alarm)\b/.test(q))return {text:`${d.sos==='ACTIVE'||state.sharedSosActive?'SOS is currently ACTIVE. Check on the user now.':'No active SOS is currently reported.'} The ESP32 touch control activates SOS; a 3-second hold cancels an active SOS. The dashboard can notify configured contacts when the live device reports SOS.`};
+  if(/\b(device|usb|connect|sensor|mpu|status|online|offline)\b/.test(q))return {text:`ESP32 USB is ${state.usbConnected?'connected':'not connected'}${d.mpuConnected===true?', and the MPU6050 is reported connected':d.mpuConnected===false?', but the MPU6050 is reported disconnected': ''}. ${d.updatedAt?`Latest device report: ${new Date(d.updatedAt).toLocaleString()}.`:'No device report has been received in this session.'} Use “Connect ESP32 USB” in the top bar to connect.`};
+  if(/\b(help|what can|feature|how to)\b/.test(q))return {text:'I can explain SOS and fall detection, report connection status, show saved emergency contacts, and provide a Google Maps link when the device has a GPS fix. Ask a specific question, such as “Where is my device?”'};
+  return {text:'I can answer questions using Safe Her’s current dashboard data and documented device behavior. Try asking about SOS, fall detection, emergency contacts, USB status, or the device map. I don’t have access to information outside this system.'};
+}
+function addChatMessage(text,who='assistant',link=null,label=''){
+  const messages=document.querySelector('#chat-messages');if(!messages)return;
+  const bubble=document.createElement('div');bubble.className=`chat-message ${who}-message`;bubble.textContent=text;
+  if(link){const anchor=document.createElement('a');anchor.href=link;anchor.textContent=label;if(link.startsWith('http')){anchor.target='_blank';anchor.rel='noopener noreferrer';}else anchor.addEventListener('click',()=>{document.querySelector('#chat-panel').hidden=true;document.querySelector('#chat-launcher').setAttribute('aria-expanded','false');});bubble.append(document.createElement('br'),anchor);}
+  messages.append(bubble);messages.scrollTop=messages.scrollHeight;
+}
+function submitChatQuestion(question){const text=question.trim();if(!text)return;addChatMessage(text,'user');const answer=safeHerAnswer(text);addChatMessage(answer.text,'assistant',answer.link,answer.label);}
+function initializeChat(){
+  const launcher=document.querySelector('#chat-launcher'),panel=document.querySelector('#chat-panel'),input=document.querySelector('#chat-input');
+  launcher.addEventListener('click',()=>{panel.hidden=!panel.hidden;launcher.setAttribute('aria-expanded',String(!panel.hidden));if(!panel.hidden)input.focus();});
+  document.querySelector('#chat-close').addEventListener('click',()=>{panel.hidden=true;launcher.setAttribute('aria-expanded','false');launcher.focus();});
+  document.querySelector('#chat-form').addEventListener('submit',event=>{event.preventDefault();submitChatQuestion(input.value);input.value='';input.focus();});
+  document.querySelectorAll('[data-chat-prompt]').forEach(button=>button.addEventListener('click',()=>submitChatQuestion(button.dataset.chatPrompt)));
+}
 function navigate() { const page = location.hash.slice(1); state.page = renderers[page] ? page : 'overview'; render(); document.querySelector('#sidebar').classList.remove('open'); document.querySelector('#mobile-overlay').classList.remove('show'); }
 window.addEventListener('hashchange', navigate);
 window.addEventListener('resize', () => { drawChart(); drawFallChart(); });
@@ -847,6 +902,13 @@ document.querySelector('#mobile-overlay').addEventListener('click', () => { docu
 document.querySelector('#theme-toggle').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
 document.querySelector('#usb-connect').addEventListener('click', () => void connectUsb());
 document.querySelector('#notification-button').addEventListener('click', () => toast(state.emergency ? 'The ESP32 reports an active SOS.' : 'No active SOS reported by the ESP32.'));
+initializeChat();
+window.addEventListener('storage',event=>{
+  if(event.key!=='safeher-sos-status')return;
+  try{const status=JSON.parse(event.newValue||'null');if(!status||typeof status.active!=='boolean')return;state.sharedSosActive=status.active;applySosVisual();if(status.active)playSosAlarm();}
+  catch{}
+});
+try{const status=JSON.parse(localStorage.getItem('safeher-sos-status')||'null');state.sharedSosActive=Boolean(status?.active);}catch{}
 setTheme(state.theme);
 async function initialize() {
   await restoreLocalState(); state.demo=false; state.authenticated=false; state.page=location.hash.slice(1)||'overview';
